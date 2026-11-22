@@ -890,7 +890,10 @@ class Panel(Gtk.ApplicationWindow):
             self.zones_label.set_text("Channels: " + (", ".join(dev.zones) if dev.zones else "none"))
         board = dev.type.lower() == "motherboard"
         if board:
-            modes = [m for m in dev.modes if m.lower() != "direct"] or ["Static"]
+            # Fire is advertised by OpenRGB's shared MSI profile but this board's
+            # firmware ignores it (silent no-op), so it is left out.
+            modes = [m for m in dev.modes
+                     if m.lower() not in ("direct", "fire")] or ["Static"]
             self.board_modes = modes
             self.board_dropdown.set_model(Gtk.StringList.new(modes))
             self.board_dropdown.set_selected(0)
