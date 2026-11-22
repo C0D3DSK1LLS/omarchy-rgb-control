@@ -39,3 +39,31 @@ KEYS += [(slot, name) for slot, name in CONFIRMED.items()]
 KEYS.sort(key=lambda item: item[0])
 
 LABELS = dict(KEYS)
+
+
+LABEL_FILE = "/home/jimmy/.config/c0d3d/rgb-key-labels.json"
+
+
+def load_labels():
+    import json, os
+    try:
+        with open(LABEL_FILE) as handle:
+            data = json.load(handle)
+        return {int(slot): str(name) for slot, name in data.items()}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_label(slot, name):
+    import json, os
+    labels = load_labels()
+    labels[int(slot)] = name
+    try:
+        os.makedirs(os.path.dirname(LABEL_FILE), exist_ok=True)
+        temp = LABEL_FILE + ".tmp"
+        with open(temp, "w") as handle:
+            json.dump({str(k): v for k, v in labels.items()}, handle)
+        os.replace(temp, LABEL_FILE)
+    except OSError:
+        pass
+    LABELS[int(slot)] = name

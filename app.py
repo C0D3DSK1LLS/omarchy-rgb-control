@@ -454,6 +454,7 @@ class Panel(Gtk.ApplicationWindow):
 
         right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         right.set_margin_start(14)
+        right.add_css_class("side")
 
         self.title_label = Gtk.Label(label="Select a device")
         self.title_label.set_xalign(0)
@@ -592,6 +593,22 @@ class Panel(Gtk.ApplicationWindow):
         clear.connect("clicked", lambda *_: self.clear_keys())
         kb_buttons.append(clear)
         self.kb_keys_row.append(kb_buttons)
+        name_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        name_hint = Gtk.Label(label="NAME A KEY")
+        name_hint.add_css_class("eyebrow")
+        name_row.append(name_hint)
+        light = Gtk.Button(label="Light it")
+        light.connect("clicked", lambda *_: self.light_selected_key())
+        name_row.append(light)
+        self.key_name_entry = Gtk.Entry()
+        self.key_name_entry.set_width_chars(14)
+        self.key_name_entry.set_placeholder_text("e.g. Left Alt")
+        name_row.append(self.key_name_entry)
+        save_name = Gtk.Button(label="Save name")
+        save_name.connect("clicked", lambda *_: self.save_selected_key_name())
+        name_row.append(save_name)
+        self.kb_keys_row.append(name_row)
+
         kb_scroller = Gtk.ScrolledWindow()
         kb_scroller.set_min_content_height(190)
         kb_scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -601,7 +618,9 @@ class Panel(Gtk.ApplicationWindow):
         self.kb_grid.set_column_spacing(3)
         self.kb_grid.set_row_spacing(3)
         self.kb_key_buttons = {}
+        saved = kb_keys.load_labels()
         for slot, label in kb_keys.KEYS:
+            label = saved.get(slot, label)
             button = Gtk.Button(label=label)
             button.add_css_class("kb-key")
             button.set_tooltip_text(f"{label} · slot {slot}")
@@ -1107,6 +1126,32 @@ class Panel(Gtk.ApplicationWindow):
         for slot, button in self.kb_key_buttons.items():
             self.kb_selected.add(slot)
             button.add_css_class("kb-selected")
+
+    def light_selected_key(self):
+        if len(self.kb_selected) != 1:
+            self.set_status("Select exactly one key to identify it", False)
+            return
+        slot = next(iter(self.kb_selected))
+        frame = {index: "000000" for index in kb_keys.LABELS}
+        frame[slot] = "#ffffff"
+        self.send_keyboard_frame(frame)
+        self.set_status(f"Slot {slot} lit white — look which key it is")
+
+    def save_selected_key_name(self):
+        if len(self.kb_selected) != 1:
+            self.set_status("Select exactly one key to name it", False)
+            return
+        name = (self.key_name_entry.get_text() or "").strip()
+        if not name:
+            self.set_status("Type a name first", False)
+            return
+        slot = next(iter(self.kb_selected))
+        kb_keys.save_label(slot, name)
+        button = self.kb_key_buttons.get(slot)
+        if button is not None:
+            button.set_label(name)
+            button.set_tooltip_text(f"{name} · slot {slot}")
+        self.set_status(f"Slot {slot} is now {name}")
 
     def clear_key_selection(self):
         for slot in list(self.kb_selected):

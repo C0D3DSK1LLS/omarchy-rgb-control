@@ -2,12 +2,29 @@
 
 window {
   background-color: #040404;
+  /* Rain, then a 1px deband dither, then a faint vertical wash. */
+  background-image:
+    url("file:///home/jimmy/.local/share/c0d3d/rain/rain-a.png"),
+    url("file:///home/jimmy/.local/share/c0d3d/rain/rain-b.png"),
+    url("file:///home/jimmy/.local/share/c0d3d/rain/rain-c.png"),
+    url("file:///home/jimmy/.local/share/c0d3d/deband.png"),
+    linear-gradient(180deg, #061209 0%, #040404 45%, #070307 100%);
+  background-repeat: repeat, repeat, repeat, repeat, no-repeat;
+  background-size: 384px 480px, 512px 384px, 288px 384px, 64px 64px, cover;
+  background-position: 0 0, 0 0, 0 0, 0 0, 0 0;
+  animation: rgb-rain 18s steps(200, end) infinite;
+}
+
+@keyframes rgb-rain {
+  0%   { background-position: 0 0,      0 0,      0 0,      0 0,  0 0; }
+  100% { background-position: 0 480px,  0 -768px, 0 384px,  0 0,  0 0; }
 }
 
 headerbar {
-  background-image: linear-gradient(180deg, #0a130d, #050807);
+  background-image: linear-gradient(180deg, rgba(10, 19, 13, 0.92), rgba(5, 8, 7, 0.92));
   border-bottom: 1px solid #14351f;
-  box-shadow: inset 0 1px 0 rgba(0, 255, 65, 0.10);
+  box-shadow: inset 0 1px 0 rgba(0, 255, 65, 0.14),
+              0 0 22px rgba(0, 255, 65, 0.10);
   margin-right: 104px;
 }
 
@@ -74,7 +91,7 @@ list > row:hover {
 
 list > row:selected {
   background: linear-gradient(90deg, #14220f, #0a130d);
-  box-shadow: inset 3px 0 0 #00ff41;
+  box-shadow: inset 3px 0 0 #00ff41, 0 0 18px rgba(0, 255, 65, 0.14);
 }
 
 button {
@@ -90,12 +107,25 @@ button {
 button:hover {
   border-color: #00ff41;
   color: #dc143c;
-  box-shadow: 0 0 12px rgba(0, 255, 65, 0.12);
+  box-shadow: 0 0 16px rgba(0, 255, 65, 0.28), inset 0 0 10px rgba(0, 255, 65, 0.10);
+}
+
+button:active {
+  background-color: #0f2416;
+  box-shadow: inset 0 0 12px rgba(0, 0, 0, 0.6);
 }
 
 button.apply {
   border-color: #2a5c3a;
-  font-weight: 600;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  background-image: linear-gradient(180deg, #102a1a, #061009);
+  box-shadow: 0 0 16px rgba(0, 255, 65, 0.18), inset 0 1px 0 rgba(0, 255, 65, 0.18);
+}
+
+button.apply:hover {
+  border-color: #00ff41;
+  box-shadow: 0 0 24px rgba(0, 255, 65, 0.40), inset 0 1px 0 rgba(0, 255, 65, 0.30);
 }
 
 button.preset {
@@ -203,4 +233,37 @@ button.swatch {
 button.swatch:hover {
   border-color: #00ff41;
   box-shadow: 0 0 8px rgba(0, 255, 65, 0.25);
+}
+
+/* Fancy pass: glow on the live controls, rain behind everything else. */
+button.ram-choice:checked {
+  box-shadow: 0 0 14px rgba(0, 255, 65, 0.35), inset 0 0 6px rgba(0, 0, 0, 0.35);
+}
+
+scale highlight {
+  box-shadow: 0 0 10px rgba(0, 255, 65, 0.35);
+}
+
+scale slider {
+  box-shadow: 0 0 10px rgba(220, 20, 60, 0.45);
+}
+
+.device-title {
+  text-shadow: 0 0 12px rgba(201, 255, 210, 0.25);
+}
+
+.app-title {
+  text-shadow: 0 0 14px rgba(220, 20, 60, 0.55);
+}
+
+.status {
+  color: #7fd39a;
+}
+
+/* Scrim so the controls stay readable over the rain. */
+.side {
+  background-color: rgba(3, 8, 5, 0.62);
+  border-left: 1px solid #14351f;
+  border-radius: 10px;
+  padding: 8px;
 }
