@@ -26,6 +26,7 @@ import orbg  # noqa: E402
 import ram  # noqa: E402
 import effects  # noqa: E402
 import kbfx  # noqa: E402
+import fanfx  # noqa: E402
 import kb_keys  # noqa: E402
 
 APP_ID = "org.jimmy.RgbControl"
@@ -36,6 +37,7 @@ STATE = os.path.join(HERE, "state.json")
 RAM_STATE = os.path.expanduser("~/.local/state/ralph/rgb-ram-state.json")
 KB_STATE = os.path.expanduser("~/.local/state/ralph/rgb-keyboard-state.json")
 PANEL_STATE = os.path.expanduser("~/.local/state/ralph/rgb-panel-layout.json")
+FAN_STATE = os.path.expanduser("~/.local/state/ralph/rgb-fan-state.json")
 DEFAULT_SIDEBAR = 396
 
 # per-zone LED counts for the MSI board. The CLI's total is unreliable because
@@ -560,6 +562,28 @@ class Panel(Gtk.ApplicationWindow):
         self.board_row.append(self.board_dropdown)
         self.board_row.set_visible(False)
         right.append(self.board_row)
+
+        # My own animated effects for the ARGB headers.
+        self.fanfx_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        fanfx_lbl = Gtk.Label(label="FAN EFFECTS")
+        fanfx_lbl.add_css_class("eyebrow")
+        self.fanfx_row.append(fanfx_lbl)
+        self.fanfx_dropdown = Gtk.DropDown.new_from_strings(["None"] + fanfx.EFFECT_NAMES)
+        self.fanfx_row.append(self.fanfx_dropdown)
+        self.fanfx_start = Gtk.Button(label="Start fan effect")
+        self.fanfx_start.connect("clicked", lambda *_: self.start_fan_effect())
+        self.fanfx_row.append(self.fanfx_start)
+        self.fanfx_stop = Gtk.Button(label="Stop fan effect")
+        self.fanfx_stop.connect("clicked", lambda *_: self.stop_fan_effect())
+        self.fanfx_row.append(self.fanfx_stop)
+        self.fanfx_row.set_visible(False)
+        right.append(self.fanfx_row)
+
+        self.fanfx_palette_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+        self.fanfx_palette_row.set_visible(False)
+        self.fanfx_palette_buttons = []
+        right.append(self.fanfx_palette_row)
+        self.fanfx_dropdown.connect("notify::selected", lambda *_: self.refresh_fanfx_palette())
         self.mine_dropdown.connect("notify::selected", lambda *_: self.refresh_palette())
 
         # One colour picker per slot the chosen effect declares.
@@ -898,6 +922,8 @@ class Panel(Gtk.ApplicationWindow):
             self.board_dropdown.set_model(Gtk.StringList.new(modes))
             self.board_dropdown.set_selected(0)
         self.board_row.set_visible(board)
+        self.fanfx_row.set_visible(False)   # board firmware cannot animate per LED
+        self.refresh_fanfx_palette()
         keyboard = bool(dev.keyboard)
         for widget in (self.kb_fx_row, self.kb_keys_row):
             widget.set_visible(keyboard)
@@ -996,11 +1022,66 @@ class Panel(Gtk.ApplicationWindow):
             self.animating = False
             self.stop_button.set_visible(False)
             return
+        if dev.type.lower() == "motherboard":
+            self.stop_fan_effect()
+            time.sleep(0.9)
         if dev.type.lower() == "motherboard" and self.board_modes:
             dev.mode_override = self.board_modes[self.board_dropdown.get_selected()]
         else:
             dev.mode_override = None
         self.start_apply([dev], rgb_to_hex(self.colour_button.get_rgba()))
+
+    # ------------------------------------------------------------ fan effects
+    def refresh_fanfx_palette(self):
+        while (child := self.fanfx_palette_row.get_first_child()):
+            self.fanfx_palette_row.remove(child)
+        self.fanfx_palette_buttons = []
+        dev = self.selected
+        choice = self.fanfx_dropdown.get_selected()
+        if not (dev and dev.type.lower() == "motherboard") or choice <= 0:
+            self.fanfx_palette_row.set_visible(False)
+            return
+        _fn, defaults, labels = fanfx.BY_NAME[fanfx.EFFECT_NAMES[choice - 1]]
+        for label, default in zip(labels, defaults):
+            cell = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+            caption = Gtk.Label(label=label.upper())
+            caption.add_css_class("eyebrow")
+            caption.set_xalign(0)
+            cell.append(caption)
+            button = ColourButton("#%02x%02x%02x" % tuple(default))
+            cell.append(button)
+            self.fanfx_palette_row.append(cell)
+            self.fanfx_palette_buttons.append(button)
+        self.fanfx_palette_row.set_visible(True)
+
+    def write_fan_state(self, payload):
+        try:
+            os.makedirs(os.path.dirname(FAN_STATE), exist_ok=True)
+            temp = FAN_STATE + ".tmp"
+            with open(temp, "w") as handle:
+                json.dump(payload, handle)
+            os.replace(temp, FAN_STATE)
+        except OSError as exc:
+            self.set_status(f"Could not reach the fan service: {exc}", False)
+
+    def start_fan_effect(self):
+        choice = self.fanfx_dropdown.get_selected()
+        if choice <= 0:
+            return
+        name = fanfx.EFFECT_NAMES[choice - 1]
+        colours = [rgba_to_tuple(button.get_rgba()) for button in self.fanfx_palette_buttons]
+        self.write_fan_state({"kind": "custom", "effect": name,
+                              "colours": [list(c) for c in colours],
+                              "brightness": int(self.bright.get_value())})
+        subprocess.run(["systemctl", "--user", "start", "rgb-fans.service"],
+                       capture_output=True)
+        self.set_status(f"{name} running on the ARGB headers")
+
+    def stop_fan_effect(self):
+        self.write_fan_state({"kind": "off"})
+        subprocess.run(["systemctl", "--user", "stop", "rgb-fans.service"],
+                       capture_output=True)
+        self.set_status("Fan effect stopped")
 
     def write_lighting(self, payload, message):
         """Hand the RAM job to the lighting service; the panel never writes sticks."""

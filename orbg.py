@@ -80,9 +80,58 @@ class Client:
     def ack(self, timeout=3.0):
         return self.recv_until(10, timeout)
 
+    def controller_data(self, device):
+        """Parse ControllerData (length-prefixed strings) for zones and LEDs."""
+        _, _, data = self.request(PKT_REQUEST_CONTROLLER_DATA, device)
+        pos = 0
+
+        def u32():
+            nonlocal pos
+            value = struct.unpack_from("<I", data, pos)[0]
+            pos += 4
+            return value
+
+        def u16():
+            nonlocal pos
+            value = struct.unpack_from("<H", data, pos)[0]
+            pos += 2
+            return value
+
+        def text():
+            nonlocal pos
+            size = u16()
+            raw = data[pos:pos + size]
+            pos += size
+            return raw.decode("utf-8", "replace")
+
+        index, kind = u32(), u32()
+        name, vendor, description, version, serial, location = (text() for _ in range(6))
+        modes = []
+        for _ in range(u32()):
+            mode_name = text()
+            modes.append((mode_name, [u32() for _ in range(11)]))
+        zones = []
+        for _ in range(u32()):
+            zone_name = text()
+            zone_type, leds_min, leds_max, leds_count = u32(), u32(), u32(), u32()
+            matrix = u32()
+            if matrix:
+                pos += matrix * 4
+            zones.append({"name": zone_name, "type": zone_type, "min": leds_min,
+                          "max": leds_max, "count": leds_count})
+        led_count = u32()
+        leds = []
+        for _ in range(led_count):
+            led_name = text()
+            leds.append((led_name, u32()))
+        return {"index": index, "type": kind, "name": name, "modes": modes,
+                "zones": zones, "led_count": led_count, "leds": leds}
+
     def resize_zone(self, device, zone, size):
-        self._send(PKT_RESIZEZONE, device, struct.pack("<II", zone, size))
-        self.drain(0.08)
+        body = struct.pack("<II", zone, size)
+        payload = struct.pack("<I", 4 + len(body)) + body
+        self._send(PKT_RESIZEZONE, device, payload)
+        self.drain(0.05)
         return True
 
     def custom_mode(self, device):
@@ -102,16 +151,14 @@ class Client:
             self.sock.settimeout(old)
 
     def update_leds(self, device, colours):
-        payload = struct.pack("<I", len(colours))
-        for r, g, b in colours:
-            payload += bytes((r, g, b))
+        body = b"".join(bytes((r, g, b, 0)) for r, g, b in colours)
+        payload = struct.pack("<I", 4 + len(body)) + body
         self._send(PKT_UPDATELEDS, device, payload)
         return True
 
     def update_zone_leds(self, device, zone, colours):
-        payload = struct.pack("<II", zone, len(colours))
-        for r, g, b in colours:
-            payload += bytes((r, g, b))
+        body = struct.pack("<I", zone) + b"".join(bytes((r, g, b, 0)) for r, g, b in colours)
+        payload = struct.pack("<I", 4 + len(body)) + body
         self._send(PKT_UPDATEZONELEDS, device, payload)
         return True
 
