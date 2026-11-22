@@ -228,6 +228,7 @@ class Device:
         self.keyboard = False
         # Native ENE DRAM sticks when this entry is the RAM group.
         self.ram_sticks = []
+        self.mode_override = None
         self.ram_mode = None
         self.ram_speed = None
 
@@ -339,7 +340,7 @@ def solid_mode(dev):
 
 def device_args(dev, colour, brightness):
     known = [z.lower().replace(" ", "") for z in dev.zones]
-    mode = solid_mode(dev)
+    mode = getattr(dev, "mode_override", None) or solid_mode(dev)
     args = []
     if not dev.keyboard and known and all(key in ZONE_LEDS for key in known):
         for index, key in enumerate(known):
@@ -549,6 +550,16 @@ class Panel(Gtk.ApplicationWindow):
         self.mine_row.append(self.mine_dropdown)
         self.mine_row.set_visible(False)
         right.append(self.mine_row)
+
+        # Board: its own effect engine, exactly the list MSI Center shows.
+        self.board_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        board_lbl = Gtk.Label(label="BOARD EFFECT")
+        board_lbl.add_css_class("eyebrow")
+        self.board_row.append(board_lbl)
+        self.board_dropdown = Gtk.DropDown.new_from_strings(["Static"])
+        self.board_row.append(self.board_dropdown)
+        self.board_row.set_visible(False)
+        right.append(self.board_row)
         self.mine_dropdown.connect("notify::selected", lambda *_: self.refresh_palette())
 
         # One colour picker per slot the chosen effect declares.
@@ -877,6 +888,13 @@ class Panel(Gtk.ApplicationWindow):
         else:
             self.meta_label.set_text(f"{dev.type} · {len(dev.zones)} channel(s) · {dev.led_count} LED(s)")
             self.zones_label.set_text("Channels: " + (", ".join(dev.zones) if dev.zones else "none"))
+        board = dev.type.lower() == "motherboard"
+        if board:
+            modes = [m for m in dev.modes if m.lower() != "direct"] or ["Static"]
+            self.board_modes = modes
+            self.board_dropdown.set_model(Gtk.StringList.new(modes))
+            self.board_dropdown.set_selected(0)
+        self.board_row.set_visible(board)
         keyboard = bool(dev.keyboard)
         for widget in (self.kb_fx_row, self.kb_keys_row):
             widget.set_visible(keyboard)
@@ -975,6 +993,10 @@ class Panel(Gtk.ApplicationWindow):
             self.animating = False
             self.stop_button.set_visible(False)
             return
+        if dev.type.lower() == "motherboard" and self.board_modes:
+            dev.mode_override = self.board_modes[self.board_dropdown.get_selected()]
+        else:
+            dev.mode_override = None
         self.start_apply([dev], rgb_to_hex(self.colour_button.get_rgba()))
 
     def write_lighting(self, payload, message):
