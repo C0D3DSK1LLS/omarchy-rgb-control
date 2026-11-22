@@ -38,7 +38,9 @@ MODE_STATIC = 1
 APPLY = 1
 REG_SPEED = 0x8022
 BUSES = (6, 7, 8)
-ADDRESSES = tuple(range(0x30, 0x78))
+# Where these chips have actually been seen: 0x39-0x3C after a warm start,
+# 0x70-0x73 after a true cold boot. Anything else is not worth a 1s timeout.
+ADDRESSES = (0x39, 0x3A, 0x3B, 0x3C, 0x70, 0x71, 0x72, 0x73)
 
 # G.Skill's own effect names, in their own order, mapped one-to-one onto the
 # ENE mode register (the order matches exactly: mode 1 .. 14).
@@ -156,7 +158,7 @@ def _save_cache(known):
         pass
 
 
-def _probe(fd, address, deadline=1.0):
+def _probe(fd, address, deadline=0.12):
     """Read a stick's identity, retrying while the iMC engine is sulking."""
     limit = time.monotonic() + deadline
     while True:
