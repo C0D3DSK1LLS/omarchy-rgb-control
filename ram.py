@@ -146,10 +146,20 @@ def _load_cache():
     return known
 
 
-def _save_cache(known):
+def _load_misses():
+    try:
+        data = json.load(open(_CACHE_FILE))
+        return {(int(entry[0]), int(entry[1])): int(entry[4])
+                for entry in data if len(entry) > 4}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _save_cache(known, misses=None):
     try:
         os.makedirs(os.path.dirname(_CACHE_FILE), exist_ok=True)
-        payload = [[bus, address, name, leds] for (bus, address), (name, leds) in sorted(known.items())]
+        payload = [[bus, address, name, leds, (misses or {}).get((bus, address), 0)]
+                   for (bus, address), (name, leds) in sorted(known.items())]
         temp = _CACHE_FILE + ".tmp"
         with open(temp, "w") as handle:
             json.dump(payload, handle)
@@ -181,56 +191,71 @@ def _probe(fd, address, deadline=0.12):
         time.sleep(0.01)
 
 
-def find_sticks():
-    """Every ENE DRAM controller on the memory buses, in bus/address order.
-
-    The iMC engine occasionally NAKs a probe, so a module that has answered
-    before is remembered on disk and kept - a scan must never silently drop a
-    stick and leave it dark.
-    """
-    cache = _load_cache()
-    sticks = []
+def _scan_once(cache):
     found = {}
     for bus in BUSES:
-        path = f"/dev/i2c-{bus}"
         try:
-            fd = os.open(path, os.O_RDWR)
+            fd = os.open(f"/dev/i2c-{bus}", os.O_RDWR)
         except OSError:
             continue
         try:
             for address in ADDRESSES:
-                hit = _probe(fd, address)
+                hit = _probe(fd, address, 0.12)
+                for pause, deadline in ((0.01, 0.30), (0.05, 0.60)):
+                    if hit is not None:
+                        break
+                    time.sleep(pause)
+                    hit = _probe(fd, address, deadline)
                 key = (bus, address)
+                if hit and not (hit[0].startswith("AUDA") or hit[0].startswith("DIMM_LED")):
+                    hit = None          # garbage read; trust the remembered name
                 if hit:
                     found[key] = hit
                 elif key in cache:
                     found[key] = cache[key]
                 elif key in _KNOWN:
                     found[key] = _KNOWN[key]
-                else:
-                    continue
-                time.sleep(0.003)
         finally:
             os.close(fd)
+    return found
+
+
+def find_sticks():
+    """Every ENE DRAM controller, wherever it enumerated.
+
+    A controller occasionally NAKs a probe, so a scan runs up to three passes
+    and merges them, then falls back to the remembered list. A transient NAK
+    can therefore never drop a stick and leave it dark.
+    """
+    cache = _load_cache()
+    misses = _load_misses()
+    found = {}
+    for attempt in range(3):
+        found.update(_scan_once(cache))
+        if len(found) >= 8:
+            break
+        time.sleep(0.08)
+
+    sticks = []
     for (bus, address), (name, leds) in sorted(found.items()):
         if not (name.startswith("AUDA") or name.startswith("DIMM_LED")):
             continue
         sticks.append(Stick(len(sticks) + 1, bus, address, name, leds))
-    fresh = {key: value for key, value in found.items() if key not in cache}
-    if fresh:
+
+    for key in list(cache):
+        if key in found:
+            misses[key] = 0
+        else:
+            misses[key] = misses.get(key, 0) + 1
+            if misses[key] >= 60:
+                cache.pop(key, None)
+                misses.pop(key, None)
+    if found:
         cache.update(found)
-        _save_cache(cache)
+    if found or misses:
+        _save_cache(cache, misses)
     _KNOWN.update(found)
     return sticks
-
-
-def _scaled(hex_colour, brightness):
-    value = (hex_colour or "00ff41").lstrip("#")
-    if len(value) != 6:
-        value = "00ff41"
-    red, green, blue = (int(value[i:i + 2], 16) for i in (0, 2, 4))
-    level = max(0, min(100, int(brightness))) / 100.0
-    return (int(red * level + 0.5), int(green * level + 0.5), int(blue * level + 0.5))
 
 
 def prepare_direct(sticks):
