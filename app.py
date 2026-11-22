@@ -22,6 +22,7 @@ from gi.repository import Gdk, GLib, Gtk, Pango  # noqa: E402
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import orbg  # noqa: E402
+import ram  # noqa: E402
 
 APP_ID = "org.jimmy.RgbControl"
 OPENRGB = "/usr/local/bin/openrgb"
@@ -78,6 +79,8 @@ class Device:
         self.led_count = 0
         self.modes = []
         self.keyboard = False
+        # Native ENE DRAM sticks when this entry is the RAM group.
+        self.ram_sticks = []
 
 
 def parse_devices():
@@ -122,6 +125,18 @@ def parse_devices():
             keyboard.zones, keyboard.led_count = ["Keyboard"], 111
             devices.append(keyboard)
             break
+    # The RAM is driven natively (see ram.py). OpenRGB's CLI re-applies every
+    # DRAM controller on each run, which is what repainted the whole kit, so
+    # its DRAM entries are dropped and one native "RAM" entry takes their place.
+    devices = [dev for dev in devices if dev.type.upper() != "DRAM" or dev.keyboard]
+    sticks = ram.find_sticks()
+    if sticks:
+        group = Device(None, "RAM")
+        group.type = "DRAM"
+        group.zones = ["DRAM"]
+        group.led_count = sum(stick.leds for stick in sticks)
+        group.ram_sticks = sticks
+        devices.insert(0, group)
     return devices
 
 
@@ -152,8 +167,7 @@ def keyboard_colour(colour, brightness=100):
     return keyboard_request([colour.lstrip("#"), "--brightness", str(brightness)])
 
 
-def device_args(dev, colour, brightness):
-    known = [z.lower().replace(" ", "") for z in dev.zones]
+def solid_mode(dev):
     mode = next((value for value in dev.modes if value.lower() == "static"), None)
     if mode is None:
         mode = next((value for value in dev.modes if value.lower() == "direct"), None)
@@ -161,6 +175,12 @@ def device_args(dev, colour, brightness):
         if dev.modes:
             raise ValueError(f"{dev.name}: no supported solid-colour mode")
         mode = "Static"
+    return mode
+
+
+def device_args(dev, colour, brightness):
+    known = [z.lower().replace(" ", "") for z in dev.zones]
+    mode = solid_mode(dev)
     args = []
     if not dev.keyboard and known and all(key in ZONE_LEDS for key in known):
         for index, key in enumerate(known):
@@ -176,7 +196,9 @@ def device_args(dev, colour, brightness):
 def write_devices(devices, colour, brightness, progress, cancelled, keyboard_writer=None):
     keyboard_writer = keyboard_writer or keyboard_colour
     errors = []
-    normal = [dev for dev in devices if not is_k70_optical(dev)]
+    rams = [dev for dev in devices if dev.ram_sticks]
+    normal = [dev for dev in devices
+              if not is_k70_optical(dev) and not dev.ram_sticks]
     if normal and not cancelled.is_set():
         progress("Applying " + ", ".join(dev.name for dev in normal) + "…")
         args = []
@@ -185,6 +207,14 @@ def write_devices(devices, colour, brightness, progress, cancelled, keyboard_wri
         ok, message = cli(args)
         if not ok:
             errors.append(message or "OpenRGB update failed")
+    for dev in rams:
+        if cancelled.is_set():
+            break
+        progress(f"Applying {dev.name}…")
+        try:
+            ram.set_colour(dev.ram_sticks, colour, brightness)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{dev.name}: {exc}")
     for dev in devices:
         if is_k70_optical(dev) and not cancelled.is_set():
             progress("Applying keyboard colour…")
@@ -291,10 +321,32 @@ class Panel(Gtk.ApplicationWindow):
         bright_row.append(self.bright)
         right.append(bright_row)
 
+        # RAM kit picker: appears only for the grouped RAM entry. ALL writes
+        # every stick in one go; a number writes just that module.
+        self.ram_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        ram_lbl = Gtk.Label(label="STICK")
+        ram_lbl.add_css_class("eyebrow")
+        ram_lbl.set_xalign(0)
+        self.ram_row.append(ram_lbl)
+        self.ram_buttons = Gtk.FlowBox()
+        self.ram_buttons.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.ram_buttons.set_max_children_per_line(9)
+        self.ram_buttons.set_min_children_per_line(1)
+        self.ram_buttons.set_column_spacing(4)
+        self.ram_buttons.set_row_spacing(4)
+        self.ram_buttons.set_halign(Gtk.Align.START)
+        self.ram_row.append(self.ram_buttons)
+        self.ram_row.set_visible(False)
+        right.append(self.ram_row)
+        self.ram_choice = 0
+        self.ram_syncing = False
+        self.ram_toggles = []
+
         apply = Gtk.Button(label="Apply to this device")
         apply.add_css_class("apply")
         apply.connect("clicked", lambda *_: self.apply_selected())
         right.append(apply)
+        self.apply_button = apply
         self.actions.append(apply)
 
         self.zones_label = Gtk.Label(label="")
@@ -434,7 +486,12 @@ class Panel(Gtk.ApplicationWindow):
             name.set_xalign(0)
             name.set_ellipsize(Pango.EllipsizeMode.END)
             name.add_css_class("device-name")
-            sub = Gtk.Label(label=f"{dev.type or 'device'} · {dev.led_count} LED(s)")
+            if dev.ram_sticks:
+                sub_text = (f"{dev.type} · {len(dev.ram_sticks)} sticks · "
+                            f"{dev.led_count} LEDs")
+            else:
+                sub_text = f"{dev.type or 'device'} · {dev.led_count} LED(s)"
+            sub = Gtk.Label(label=sub_text)
             sub.set_xalign(0)
             sub.add_css_class("device-sub")
             box.append(name)
@@ -453,8 +510,64 @@ class Panel(Gtk.ApplicationWindow):
         dev = row.device
         self.selected = dev
         self.title_label.set_text(dev.name)
-        self.meta_label.set_text(f"{dev.type} · {len(dev.zones)} channel(s) · {dev.led_count} LED(s)")
-        self.zones_label.set_text("Channels: " + (", ".join(dev.zones) if dev.zones else "none"))
+        self.build_ram_choices(dev)
+        if dev.ram_sticks:
+            self.meta_label.set_text(
+                f"{dev.type} · {len(dev.ram_sticks)} sticks · {dev.led_count} LEDs")
+            self.zones_label.set_text(
+                "Apply writes only the selected stick; ALL writes the whole kit.")
+        else:
+            self.meta_label.set_text(f"{dev.type} · {len(dev.zones)} channel(s) · {dev.led_count} LED(s)")
+            self.zones_label.set_text("Channels: " + (", ".join(dev.zones) if dev.zones else "none"))
+        self.update_apply_label()
+
+    def build_ram_choices(self, dev):
+        while (child := self.ram_buttons.get_first_child()):
+            self.ram_buttons.remove(child)
+        self.ram_toggles = []
+        self.ram_choice = 0
+        if not dev.ram_sticks:
+            self.ram_row.set_visible(False)
+            return
+        labels = ["ALL"] + [str(index + 1) for index in range(len(dev.ram_sticks))]
+        for index, label in enumerate(labels):
+            button = Gtk.ToggleButton(label=label)
+            button.add_css_class("ram-choice")
+            button.set_halign(Gtk.Align.START)
+            button.set_tooltip_text("Every stick" if index == 0
+                                    else str(dev.ram_sticks[index - 1]))
+            button.set_active(index == 0)
+            button.connect("toggled", self.on_ram_choice, index)
+            self.ram_buttons.append(button)
+            self.ram_toggles.append(button)
+        self.ram_row.set_visible(True)
+
+    def on_ram_choice(self, button, index):
+        if self.ram_syncing:
+            return
+        self.ram_syncing = True
+        try:
+            if button.get_active():
+                for other_index, other in enumerate(self.ram_toggles):
+                    if other_index != index and other.get_active():
+                        other.set_active(False)
+                self.ram_choice = index
+            elif not any(toggle.get_active() for toggle in self.ram_toggles):
+                # Keep exactly one target selected.
+                button.set_active(True)
+        finally:
+            self.ram_syncing = False
+        self.update_apply_label()
+
+    def update_apply_label(self):
+        dev = self.selected
+        if dev and dev.ram_sticks:
+            count = len(dev.ram_sticks)
+            self.apply_button.set_label(
+                f"Apply to all {count} sticks" if self.ram_choice == 0
+                else f"Apply to stick {self.ram_choice}")
+        else:
+            self.apply_button.set_label("Apply to this device")
 
     # ------------------------------------------------------------------ apply
     def apply_selected(self):
@@ -462,6 +575,15 @@ class Panel(Gtk.ApplicationWindow):
             self.apply_device(self.selected)
 
     def apply_device(self, dev):
+        if dev.ram_sticks:
+            sticks = dev.ram_sticks
+            if self.ram_choice > 0:
+                sticks = [sticks[self.ram_choice - 1]]
+            target = Device(None, sticks[0].label if len(sticks) == 1 else "RAM")
+            target.type = "DRAM"
+            target.ram_sticks = sticks
+            self.start_apply([target], rgb_to_hex(self.colour_button.get_rgba()))
+            return
         self.start_apply([dev], rgb_to_hex(self.colour_button.get_rgba()))
 
     def start_apply(self, devices, colour):

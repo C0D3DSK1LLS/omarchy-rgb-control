@@ -103,6 +103,24 @@ button.preset {
   border-color: #17301f;
 }
 
+/* RAM stick picker: ALL plus one button per module, wrapping if space runs out. */
+button.ram-choice {
+  min-width: 26px;
+  padding: 2px 9px;
+  border-radius: 9px;
+  border-color: #1d3b25;
+  background-color: #060d09;
+  color: #dcffe4;
+  font-weight: 600;
+}
+
+button.ram-choice:checked {
+  background-color: #00ff41;
+  border-color: #00ff41;
+  color: #04120a;
+  box-shadow: 0 0 10px rgba(0, 255, 65, 0.22);
+}
+
 dropdown > button {
   color: #dcffe4;
   border-color: #1d3b25;
