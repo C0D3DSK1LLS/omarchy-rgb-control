@@ -1,27 +1,22 @@
 # PeaceMachine RGB Control
 
-Live control of every LED OpenRGB can reach, over the SDK rather than the CLI.
-The CLI re-opens each device on every run and wipes the other channels; talking
-to `openrgb --server` keeps everything open so one update lands atomically.
+Control of the board, GPU and mouse through the OpenRGB CLI, plus the K70
+Optical keyboard's capture-backed native HID sender.
 
-* `openrgb --server` runs as the user unit `rgb-server.service` (127.0.0.1:6742).
-* Board, GPU, mouse are written through the SDK (`orbg.py`).
-* Addressable zones are resized to 30 LEDs before a frame (that is what the fan
-  hub answers to — more than that and the header refuses the frame).
-* The keyboard is written with the CLI's hardware `Static` mode; its software
-  mode leaves it dark once the app closes.
+Addressable zones are resized to 30 LEDs before a frame. Keyboard brightness
+uses OpenRGB; its colour picker and presets use `kb-colour.py`. Presets update
+the keyboard last so later OpenRGB initialization cannot reset its mode.
 
 Run with `c0d3d-rgb-control` or from the menu as **PeaceMachine RGB Control**.
 
-Known gaps: keyboard writes are not landing yet (it shows its own hardware
-profile), saved profiles and apply-at-login, and the Trident Z Royal RAM which
+Known gaps: saved profiles/apply-at-login and the Trident Z Royal RAM which
 the board keeps off the Linux-visible SMBus.
 
 ## K70 optical protocol correction — 22 November 2026
 
 `kb-colour.py` now replays the successful lighting setup in `kb2.pcapng`, using
-fixtures in `k70-capture.json`. It is a standalone hardware-test sender, not yet
-wired into the panel: physical LED behaviour must be confirmed first.
+fixtures in `k70-capture.json`. The sender is wired into the panel. C0D3D confirmed a green-ish colour after
+the standalone command; the panel integration still needs his live check.
 
 The handover misidentified three things:
 
@@ -59,5 +54,6 @@ python3 ~/.local/share/c0d3d/rgb-control/kb-colour.py --restore
 ```
 
 No boot profile is saved. Do not run concurrent writers against the keyboard.
-The development sandbox exposes sysfs but no /dev/hidraw devices, so command
-acceptance and actual LEDs remain unverified on Linux until the host test runs.
+The development sandbox exposes sysfs but no /dev/hidraw devices, so the
+standalone hardware test was run by C0D3D. Offline panel checks cover routing,
+colour arguments, brightness ordering and failed-command reporting.

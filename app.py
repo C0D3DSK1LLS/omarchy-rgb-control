@@ -5,8 +5,8 @@ Talks to a running `openrgb --server` through the SDK (see orbg.py) instead of
 shelling out: the CLI re-opens every device on each run, which wipes whatever was
 applied to the other channels, and that is what kept knocking colours out.
 
-The keyboard is written with the CLI's hardware "Static" mode rather than the
-server, because software/direct writes leave it dark when the app closes.
+The K70 Optical keyboard uses the capture-backed HID sender for colour and
+OpenRGB for brightness. Apply it last because OpenRGB can reset its mode.
 """
 import json
 import os
@@ -111,6 +111,20 @@ def cli(args):
     try:
         r = subprocess.run([OPENRGB] + args, capture_output=True, text=True, timeout=25)
         return r.returncode == 0, (r.stdout + r.stderr).strip()
+    except Exception as exc:
+        return False, str(exc)
+
+
+def is_k70_optical(dev):
+    return dev.keyboard and "k70 rgb pro optical" in dev.name.lower()
+
+
+def keyboard_colour(colour):
+    try:
+        result = subprocess.run(
+            [sys.executable, os.path.join(HERE, "kb-colour.py"), colour.lstrip("#")],
+            capture_output=True, text=True, timeout=15)
+        return result.returncode == 0, (result.stdout + result.stderr).strip()
     except Exception as exc:
         return False, str(exc)
 
@@ -284,6 +298,15 @@ class Panel(Gtk.ApplicationWindow):
         self.brightness = int(self.bright.get_value())
 
         if dev.keyboard:
+            if is_k70_optical(dev):
+                # Brightness works through OpenRGB; colour needs the actual
+                # optical keyboard protocol. Run HID last, after CLI teardown.
+                ok, msg = cli(["-d", dev.name, "-b", str(self.brightness)])
+                if ok:
+                    ok, msg = keyboard_colour(colour)
+                self.set_status(f"{dev.name}: {colour} at {self.brightness}%" if ok else
+                                f"{dev.name}: {msg.splitlines()[-1] if msg else 'failed'}", ok)
+                return ok
             ok, msg = cli(["-d", dev.name, "-m", "Static", "-c", colour.lstrip("#"),
                            "-b", str(self.brightness)])
             self.set_status(f"{dev.name}: hardware Static {colour}" if ok else
@@ -310,9 +333,16 @@ class Panel(Gtk.ApplicationWindow):
     def apply_everything(self, colour):
         rgba = hex_to_rgba(colour)
         self.colour_button.set_rgba(rgba)
-        for dev in self.devices:
-            self.apply_device(dev)
-        self.set_status(f"Every device set to {colour} at {self.brightness}%")
+        failed = []
+        # OpenRGB scans can reset the keyboard's software mode. Finish its HID
+        # update after every OpenRGB command, regardless of enumeration order.
+        for dev in sorted(self.devices, key=is_k70_optical):
+            if not self.apply_device(dev):
+                failed.append(dev.name)
+        if failed:
+            self.set_status("Failed: " + ", ".join(failed), False)
+        else:
+            self.set_status(f"Every device set to {colour} at {self.brightness}%")
 
     # ----------------------------------------------------------------- chrome
     def set_status(self, text, ok=True):
@@ -326,7 +356,7 @@ class Panel(Gtk.ApplicationWindow):
         dlg.set_program_name("PeaceMachine RGB Control")
         dlg.set_version("1.0.0")
         dlg.set_comments("Board, fans, GPU and mouse from one window, over a live "
-                         "OpenRGB connection. Keyboard takes a hardware Static.")
+                         "OpenRGB controller. K70 Optical colour uses its native HID protocol.")
         dlg.set_website("https://peacemachinestudios.com")
         dlg.set_copyright("© 2026 William James Sova (C0D3D) — PeaceMachineStudios")
         dlg.set_logo_icon_name("preferences-color")
