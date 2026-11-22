@@ -81,6 +81,8 @@ class Device:
         self.keyboard = False
         # Native ENE DRAM sticks when this entry is the RAM group.
         self.ram_sticks = []
+        self.ram_mode = None
+        self.ram_speed = None
 
 
 def parse_devices():
@@ -212,7 +214,9 @@ def write_devices(devices, colour, brightness, progress, cancelled, keyboard_wri
             break
         progress(f"Applying {dev.name}…")
         try:
-            ram.set_colour(dev.ram_sticks, colour, brightness)
+            mode = dev.ram_mode if dev.ram_mode is not None else ram.MODE_STATIC
+            speed = dev.ram_speed if dev.ram_speed is not None else 2
+            ram.set_effect(dev.ram_sticks, mode, colour, brightness, speed)
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{dev.name}: {exc}")
     for dev in devices:
@@ -338,6 +342,27 @@ class Panel(Gtk.ApplicationWindow):
         self.ram_row.append(self.ram_buttons)
         self.ram_row.set_visible(False)
         right.append(self.ram_row)
+
+        # Effect and speed, same hardware list the G.Skill tool offers.
+        self.effect_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        effect_lbl = Gtk.Label(label="EFFECT")
+        effect_lbl.add_css_class("eyebrow")
+        self.effect_row.append(effect_lbl)
+        self.effect_dropdown = Gtk.DropDown.new_from_strings(ram.MODE_NAMES)
+        self.effect_dropdown.set_selected(1)          # Static
+        self.effect_row.append(self.effect_dropdown)
+        self.effect_row.set_visible(False)
+        right.append(self.effect_row)
+
+        self.speed_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        speed_lbl = Gtk.Label(label="SPEED")
+        speed_lbl.add_css_class("eyebrow")
+        self.speed_row.append(speed_lbl)
+        self.speed_dropdown = Gtk.DropDown.new_from_strings(ram.SPEED_NAMES)
+        self.speed_dropdown.set_selected(2)           # Normal
+        self.speed_row.append(self.speed_dropdown)
+        self.speed_row.set_visible(False)
+        right.append(self.speed_row)
         self.ram_choice = 0
         self.ram_syncing = False
         self.ram_toggles = []
@@ -526,6 +551,8 @@ class Panel(Gtk.ApplicationWindow):
             self.ram_buttons.remove(child)
         self.ram_toggles = []
         self.ram_choice = 0
+        self.effect_row.set_visible(bool(dev.ram_sticks))
+        self.speed_row.set_visible(bool(dev.ram_sticks))
         if not dev.ram_sticks:
             self.ram_row.set_visible(False)
             return
@@ -582,6 +609,8 @@ class Panel(Gtk.ApplicationWindow):
             target = Device(None, sticks[0].label if len(sticks) == 1 else "RAM")
             target.type = "DRAM"
             target.ram_sticks = sticks
+            target.ram_mode = ram.MODES[self.effect_dropdown.get_selected()][1]
+            target.ram_speed = ram.SPEEDS[self.speed_dropdown.get_selected()][1]
             self.start_apply([target], rgb_to_hex(self.colour_button.get_rgba()))
             return
         self.start_apply([dev], rgb_to_hex(self.colour_button.get_rgba()))

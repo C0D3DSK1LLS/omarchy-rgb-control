@@ -34,8 +34,34 @@ REG_APPLY = 0x80A0
 
 MODE_STATIC = 1
 APPLY = 1
+REG_SPEED = 0x8022
 BUSES = (7, 8)
 ADDRESSES = (0x39, 0x3A, 0x3B, 0x3C)
+
+# G.Skill's own effect names, in their own order, mapped one-to-one onto the
+# ENE mode register (the order matches exactly: mode 1 .. 14).
+MODES = [
+    ("Off", 0),
+    ("Static", 1),
+    ("Breathing", 2),
+    ("Strobing", 3),
+    ("Cycle", 4),
+    ("Rainbow", 5),
+    ("Breathing Rainbow", 6),
+    ("Comet", 7),
+    ("Comet Rainbow", 8),
+    ("Flash", 9),
+    ("Flash Rainbow", 10),
+    ("Wave", 11),
+    ("Glowing Yoyo", 12),
+    ("Starry Night", 13),
+    ("Default", 14),
+]
+MODE_NAMES = [name for name, _ in MODES]
+
+# ENE speed register: 0 is fastest, 4 slowest.
+SPEEDS = [("Fastest", 0), ("Fast", 1), ("Normal", 2), ("Slow", 3), ("Slowest", 4)]
+SPEED_NAMES = [name for name, _ in SPEEDS]
 
 
 class _Data(ctypes.Union):
@@ -134,8 +160,8 @@ def _scaled(hex_colour, brightness):
     return (int(red * level + 0.5), int(green * level + 0.5), int(blue * level + 0.5))
 
 
-def set_colour(sticks, hex_colour, brightness=100):
-    """Paint these sticks (and only these) one solid colour."""
+def set_effect(sticks, mode, hex_colour, brightness=100, speed=2):
+    """Apply one effect (and only to these sticks)."""
     if not sticks:
         return 0
     red, green, blue = _scaled(hex_colour, brightness)
@@ -144,18 +170,32 @@ def set_colour(sticks, hex_colour, brightness=100):
         fd = os.open(f"/dev/i2c-{stick.bus}", os.O_RDWR)
         try:
             _write(fd, stick.address, REG_DIRECT, 0)      # effect mode
-            _write(fd, stick.address, REG_MODE, MODE_STATIC)
-            for led in range(stick.leds):
-                base = REG_COLORS_EFFECT + 3 * led
+            if mode == 1:
+                # Static keeps a colour per LED.
+                slots = stick.leds
+            elif mode == 0:
+                slots = 0
+            else:
+                # Animated effects read up to ten colour slots.
+                slots = 10
+            for slot in range(slots):
+                base = REG_COLORS_EFFECT + 3 * slot
                 # The chip takes R, B, G — verified against a crimson write.
                 _write(fd, stick.address, base, red)
                 _write(fd, stick.address, base + 1, blue)
                 _write(fd, stick.address, base + 2, green)
+            _write(fd, stick.address, REG_MODE, mode)
+            _write(fd, stick.address, REG_SPEED, max(0, min(4, speed)))
             _write(fd, stick.address, REG_APPLY, APPLY)
         finally:
             os.close(fd)
         painted += 1
     return painted
+
+
+def set_colour(sticks, hex_colour, brightness=100):
+    """Solid colour on these sticks."""
+    return set_effect(sticks, MODE_STATIC, hex_colour, brightness, 2)
 
 
 if __name__ == "__main__":
