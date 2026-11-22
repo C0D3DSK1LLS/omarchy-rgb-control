@@ -191,6 +191,50 @@ def _probe(fd, address, deadline=0.12):
         time.sleep(0.01)
 
 
+def _ene(bus, fd, address, register, value=None):
+    if value is None:
+        return _read(fd, address, register)
+    _write(fd, address, register, value)
+
+
+def _remap_slots(bus, fd, cache):
+    """Spread the modules from the single 0x77 address across the slot range.
+
+    This mirrors OpenRGB's ENE DRAM detection: 0x80F8 selects the slot and
+    0x80F9 takes the new I2C address shifted left by one.
+    """
+    targets = [0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76]
+    try:
+        name = bytes(_read(fd, 0x77, REG_DEVICE_NAME + i) for i in range(8))
+        if not name.split(b"\0")[0].startswith(b"AUDA"):
+            return False
+    except OSError:
+        return False
+    moved = 0
+    for slot in range(8):
+        try:
+            _read(fd, 0x77, REG_DEVICE_NAME)
+        except OSError:
+            break
+        free = None
+        for address in targets:
+            try:
+                _xfer(fd, address, SMBUS_READ, 0x00, BYTE_DATA)
+            except OSError:
+                free = address
+                break
+        if free is None:
+            break
+        try:
+            _ene(bus, fd, 0x77, 0x80F8, slot)
+            _ene(bus, fd, 0x77, 0x80F9, (free << 1) & 0xFF)
+            time.sleep(0.01)
+            moved += 1
+        except OSError:
+            break
+    return moved > 0
+
+
 def _scan_once(cache):
     found = {}
     familial = (0x70, 0x71, 0x72, 0x73)
@@ -201,6 +245,15 @@ def _scan_once(cache):
         except OSError:
             continue
         try:
+            # A cold boot can leave every module parked on 0x77 with no slot
+            # addresses published; remap them before choosing a family.
+            try:
+                header = bytes(_read(fd, 0x77, REG_DEVICE_NAME + i) for i in range(8))
+                parked = header.split(b"\0")[0].startswith(b"AUDA")
+            except OSError:
+                parked = False
+            if parked:
+                _remap_slots(bus, fd, cache)
             # One quick probe decides which address family this board is using;
             # probing the empty family costs a second per address otherwise.
             family = None
