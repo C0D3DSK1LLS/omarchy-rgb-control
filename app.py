@@ -138,35 +138,43 @@ def is_k70_optical(dev):
     return dev.keyboard and "k70 rgb pro optical" in dev.name.lower()
 
 
-def keyboard_colour(colour, brightness=100):
-    return False, "Keyboard lighting paused after input malfunction; reconnect the keyboard to restore normal typing"
-
-
-def _disabled_keyboard_colour(colour, brightness=100):
+def keyboard_request(args):
     try:
         result = subprocess.run(
-            [sys.executable, os.path.join(HERE, "kb-colour.py"), colour.lstrip("#"), "--brightness", str(brightness)],
-            capture_output=True, text=True, timeout=15)
+            [sys.executable, os.path.join(HERE, "kb-colour.py")] + args,
+            capture_output=True, text=True, timeout=8)
         return result.returncode == 0, (result.stdout + result.stderr).strip()
     except Exception as exc:
         return False, str(exc)
 
 
+def keyboard_colour(colour, brightness=100):
+    return keyboard_request([colour.lstrip("#"), "--brightness", str(brightness)])
+
+
 def device_args(dev, colour, brightness):
     known = [z.lower().replace(" ", "") for z in dev.zones]
+    mode = next((value for value in dev.modes if value.lower() == "static"), None)
+    if mode is None:
+        mode = next((value for value in dev.modes if value.lower() == "direct"), None)
+    if mode is None:
+        if dev.modes:
+            raise ValueError(f"{dev.name}: no supported solid-colour mode")
+        mode = "Static"
     args = []
     if not dev.keyboard and known and all(key in ZONE_LEDS for key in known):
         for index, key in enumerate(known):
             args += ["-d", dev.name, "-z", str(index)]
             if key in ADDRESSABLE:
                 args += ["-sz", str(ADDRESSABLE_LEN)]
-            args += ["-m", "Static", "-c", colour.lstrip("#"), "-b", str(brightness)]
+            args += ["-m", mode, "-c", colour.lstrip("#"), "-b", str(brightness)]
     else:
-        args = ["-d", dev.name, "-m", "Static", "-c", colour.lstrip("#"), "-b", str(brightness)]
+        args = ["-d", dev.name, "-m", mode, "-c", colour.lstrip("#"), "-b", str(brightness)]
     return args
 
 
-def write_devices(devices, colour, brightness, progress, cancelled):
+def write_devices(devices, colour, brightness, progress, cancelled, keyboard_writer=None):
+    keyboard_writer = keyboard_writer or keyboard_colour
     errors = []
     normal = [dev for dev in devices if not is_k70_optical(dev)]
     if normal and not cancelled.is_set():
@@ -180,7 +188,7 @@ def write_devices(devices, colour, brightness, progress, cancelled):
     for dev in devices:
         if is_k70_optical(dev) and not cancelled.is_set():
             progress("Applying keyboard colour…")
-            ok, message = keyboard_colour(colour, brightness)
+            ok, message = keyboard_writer(colour, brightness)
             if not ok:
                 errors.append(message or "Keyboard update failed")
     if cancelled.is_set():
@@ -200,6 +208,10 @@ class Panel(Gtk.ApplicationWindow):
         self.busy = False
         self.closed = False
         self.cancelled = threading.Event()
+        self.hardware_lock = threading.Lock()
+        self.keyboard_touched = False
+        self.keyboard_alive = False
+        self.keepalive_source = None
         self.actions = []
         self.connect("close-request", self.on_close)
         self.colour_hex = "#00ff41"
@@ -320,13 +332,47 @@ class Panel(Gtk.ApplicationWindow):
         activity.set_hexpand(True)
         root.append(activity)
 
+        self.keepalive_source = GLib.timeout_add_seconds(20, self.keep_keyboard_alive)
         GLib.idle_add(self.scan)
 
     # ------------------------------------------------------------------ state
+    def release_keyboard(self):
+        self.keyboard_alive = False
+        if self.keyboard_touched:
+            ok, message = keyboard_request(["--restore"])
+            if ok:
+                self.keyboard_touched = False
+            return ok, message
+        return True, ""
+
     def on_close(self, *_args):
         self.closed = True
         self.cancelled.set()
+        if self.keepalive_source is not None:
+            GLib.source_remove(self.keepalive_source)
+            self.keepalive_source = None
+        def cleanup():
+            # Wait for any colour write before restoring hardware control.
+            with self.hardware_lock:
+                self.release_keyboard()
+        threading.Thread(target=cleanup, name="rgb-release").start()
         return False
+
+    def keep_keyboard_alive(self):
+        if self.closed:
+            return False
+        if self.busy or not self.keyboard_touched or not self.keyboard_alive:
+            return True
+        def work():
+            result = keyboard_request(["--ping"])
+            if not result[0]:
+                self.release_keyboard()
+            return result
+        def finish(result):
+            ok, message = result
+            self.set_status("Keyboard lighting active" if ok else message, ok)
+        self.run_job("Checking keyboard lighting…", work, finish)
+        return True
 
     def set_busy(self, busy):
         self.busy = busy
@@ -350,10 +396,11 @@ class Panel(Gtk.ApplicationWindow):
         self.set_busy(True)
         self.set_status(message)
         def worker():
-            try:
-                result, error = work(), None
-            except Exception as exc:
-                result, error = None, str(exc)
+            with self.hardware_lock:
+                try:
+                    result, error = work(), None
+                except Exception as exc:
+                    result, error = None, str(exc)
             def done():
                 if not self.closed:
                     self.set_busy(False)
@@ -425,8 +472,17 @@ class Panel(Gtk.ApplicationWindow):
         self.brightness = int(self.bright.get_value())
         brightness = self.brightness
         devices = list(devices)
+        def native_write(value, level):
+            # Set before USB begins so closing during first apply still restores.
+            self.keyboard_touched = True
+            result = keyboard_colour(value, level)
+            self.keyboard_alive = result[0]
+            if not result[0]:
+                self.release_keyboard()
+            return result
         def work():
-            return write_devices(devices, colour, brightness, self.post_status, self.cancelled)
+            return write_devices(devices, colour, brightness, self.post_status,
+                                 self.cancelled, keyboard_writer=native_write)
         def finish(result):
             ok, message = result
             self.set_status(message, ok)

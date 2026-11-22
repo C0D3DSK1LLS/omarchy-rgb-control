@@ -43,8 +43,11 @@ class PanelHarness:
  apply_everything=m.Panel.apply_everything
  start_apply=m.Panel.start_apply
  on_close=m.Panel.on_close
+ release_keyboard=m.Panel.release_keyboard
+ keep_keyboard_alive=m.Panel.keep_keyboard_alive
  def __init__(self):
   self.busy=self.closed=False;self.cancelled=threading.Event()
+  self.hardware_lock=threading.Lock();self.keyboard_touched=False;self.keepalive_source=None
   self.actions=[Control()];self.spinner=Control();self.colour_button=Control()
   self.bright=Control();self.status=Status();self.devices=[]
  def show_devices(self,devices):self.devices=devices
@@ -63,7 +66,7 @@ def pump(seconds):
    if not m.GLib.MainContext.default().pending():break
    m.GLib.MainContext.default().iteration(False)
   time.sleep(.005)
-with patch.object(m,'parse_devices',side_effect=slow_scan),patch.object(m,'keyboard_colour',side_effect=slow_native),patch.object(m,'cli',side_effect=slow_cli):
+with patch.object(m,'keyboard_request',return_value=(True,'')),patch.object(m,'parse_devices',side_effect=slow_scan),patch.object(m,'keyboard_colour',side_effect=slow_native),patch.object(m,'cli',side_effect=slow_cli):
  win=PanelHarness();win.scan()
  timer=m.GLib.timeout_add(20,lambda:(ticks.append(time.monotonic()) or True))
  pump(.2);assert win.busy and not win.actions[0].get_sensitive()
@@ -82,3 +85,9 @@ with patch.object(m,'parse_devices',side_effect=slow_scan),patch.object(m,'keybo
  win.apply_device(k);pump(.1);win.close();assert win.closed and win.cancelled.is_set();pump(.7)
  m.GLib.source_remove(timer)
 print('PASS: batched zones; keyboard bypass; brightness routing; CLI errors; GLib heartbeat during slow scan/apply/preset; no overlapping jobs; scan failure; close during work')
+
+# Mouse supports Direct, but has no Static mode (the real screenshot failure).
+mouse=m.Device(2,'Corsair Nightsword');mouse.modes=['Direct','Breathing']
+args=m.device_args(mouse,'#00ff41',80)
+assert args[args.index('-m')+1]=='Direct'
+print('PASS: Nightsword uses supported Direct mode')

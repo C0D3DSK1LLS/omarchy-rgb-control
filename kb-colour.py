@@ -58,14 +58,45 @@ def control_path():
     return matches[0]
 
 
+class ProtocolError(RuntimeError):
+    def __init__(self, command, status):
+        self.command, self.status = command, status
+        super().__init__(f"Keyboard rejected command {command:02x}: status {status:02x}")
+
+
+def validate_packet(packet):
+    """Strict boundary: no key assignments, performance, macros or flash writes."""
+    if len(packet) != 1024:
+        raise ValueError("Expected a 1024-byte protocol packet")
+    allowed = (
+        '08 02 03',                 # read current control mode
+        '08 01 03 00 01',           # restore hardware control
+        '08 01 03 00 02',           # enable software lighting
+        '08 0d 00 22',              # lighting resource only, handle 0
+        '08 05 01 00',              # close lighting handle
+        '08 12',                   # firmware keepalive
+    )
+    if any(packet == bytes.fromhex(head).ljust(1024, b'\0') for head in allowed):
+        return
+    if (packet[:9] == bytes.fromhex('08 06 00 ac 01 00 00 12 00')
+            and not any(packet[435:])):
+        return
+    raise ValueError("Refusing a non-lighting keyboard command")
+
+
 def validate_response(response, command):
     if len(response) < 3 or response[:2] != bytes((0, command)):
         raise RuntimeError('Unexpected reply: ' + response[:16].hex(' '))
     if response[2]:
-        raise RuntimeError(f'Keyboard rejected command {command:02x}: status {response[2]:02x}')
+        raise ProtocolError(command, response[2])
+
+
+def packet(hex_string):
+    return bytes.fromhex(hex_string).ljust(1024, b'\0')
 
 
 def exchange(fd, packet):
+    validate_packet(packet)
     report = b'\0' + packet
     count = os.write(fd, report)
     if count != len(report):
@@ -84,31 +115,60 @@ def exchange(fd, packet):
             continue
         validate_response(response, packet[1])
         print(f'  {packet[:8].hex(" ")} -> {response[:4].hex(" ")}', flush=True)
-        return
+        return response
     raise RuntimeError(f'No reply to command {packet[1]:02x}; another RGB controller may be competing')
 
 
+def restore_hardware(fd):
+    # Always try mode restoration even if the optional handle close is rejected.
+    try:
+        exchange(fd, packet('08 05 01 00'))
+    except (OSError, RuntimeError):
+        pass
+    exchange(fd, packet('08 01 03 00 01'))
+
+
+def set_colour(fd, rgb):
+    reply = exchange(fd, packet('08 02 03'))
+    if len(reply) < 4 or reply[3] not in (1, 2):
+        raise RuntimeError('Unexpected keyboard mode')
+    if reply[3] == 1:
+        exchange(fd, packet('08 01 03 00 02'))
+    try:
+        exchange(fd, packet('08 0d 00 22'))
+    except ProtocolError as exc:
+        if exc.status != 3:
+            raise
+        # ckb-next's bragi_open_handle does this when a handle is already open.
+        exchange(fd, packet('08 05 01 00'))
+        exchange(fd, packet('08 0d 00 22'))
+    template = dict(capture_packets())[10948]
+    exchange(fd, recolour(template, rgb))
+
+
 def self_test():
-    packets = capture_packets()
-    for _, packet in packets:
-        assert recolour(packet, bytes.fromhex('1b33ff')) == packet
-        changed = recolour(packet, bytes.fromhex('00ff41'))
-        assert len(changed) == 1024
-        if packet[1:3] == b'\x06\x00' and packet[7:9] == b'\x12\x00':
-            assert changed[:9] == packet[:9] and changed[435:] == packet[435:]
-            assert sum(changed[i:i+3] == b'\x00\xff\x41' for i in range(9,435,3)) == sum(packet[i:i+3] == bytes.fromhex('1b33ff') for i in range(9,435,3))
-            for i in range(9,435,3):
-                if packet[i:i+3] in (b'\0\0\0', b'\xff\xff\xff'):
-                    assert changed[i:i+3] == packet[i:i+3]
-    validate_response(b'\0\x06\0', 6)
-    for bad in (b'\0\x06\x03', b'\0\x0d\0', b''):
+    template = dict(capture_packets())[10948]
+    assert recolour(template, bytes.fromhex('1b33ff')) == template
+    for colour in ('00ff41', 'dc143c', '000000', 'ffffff'):
+        changed = recolour(template, bytes.fromhex(colour))
+        validate_packet(changed)
+        assert changed[:9] == template[:9] and changed[435:] == template[435:]
+    # Old input/performance/indicator configuration is forbidden at transport.
+    rejected = 0
+    for _, captured in capture_packets():
         try:
-            validate_response(bad, 6)
-        except RuntimeError:
-            pass
-        else:
-            raise AssertionError('Accepted a failed/mismatched response')
-    print('PASS: exact captured packets, 142 RGB slots, colour slots replaced, unused/white indicator slots preserved, errors rejected')
+            validate_packet(captured)
+        except ValueError:
+            rejected += 1
+    assert rejected == 6
+    validate_response(b'\0\x06\0', 6)
+    try:
+        validate_response(b'\0\x06\x03', 6)
+    except ProtocolError:
+        pass
+    else:
+        raise AssertionError('Accepted an error response')
+    print('PASS: colour packets valid; key-assignment, performance and indicator writes blocked')
 
 
 def main():
@@ -117,13 +177,12 @@ def main():
     parser.add_argument('--self-test', action='store_true', help='check capture fixtures without opening hardware')
     parser.add_argument('--brightness', type=int, default=100, choices=range(101), metavar='0-100',
                         help='scale key RGB values without another RGB controller')
+    parser.add_argument('--ping', action='store_true', help='keep software lighting active without changing inputs')
     parser.add_argument('--restore', action='store_true', help='return to the stored hardware lighting profile')
     args = parser.parse_args()
     if args.self_test:
         self_test()
         return 0
-    if not args.restore:
-        raise RuntimeError('Keyboard colour control disabled after input malfunction; use --restore for hardware mode')
     colour = args.colour.lstrip('#')
     if len(colour) != 6:
         parser.error('colour must contain six hexadecimal digits')
@@ -144,15 +203,24 @@ def main():
                 break
             os.read(fd, 1024)
         if args.restore:
-            exchange(fd, bytes.fromhex('08 01 03 00 01').ljust(1024, b'\0'))
+            restore_hardware(fd)
             print('Hardware profile requested and accepted.')
             return 0
-        print(f'{path}: requesting #{colour.upper()} at {args.brightness}% using captured iCUE lighting setup', flush=True)
-        for number, packet in capture_packets():
-            exchange(fd, recolour(packet, rgb))
-            time.sleep(0.003)
-    print('All commands accepted. Check the keyboard LEDs; this does not save a boot profile.')
+        try:
+            if args.ping:
+                exchange(fd, packet('08 12'))
+            else:
+                print(f'{path}: requesting #{colour.upper()} at {args.brightness}% (lighting only)', flush=True)
+                set_colour(fd, rgb)
+        except (OSError, RuntimeError, ValueError):
+            try:
+                restore_hardware(fd)
+            except (OSError, RuntimeError):
+                print('Hardware reset also failed; reconnect the keyboard.', file=sys.stderr)
+            raise
+    print('Lighting command accepted; keyboard assignments were not changed.')
     return 0
+
 
 
 if __name__ == '__main__':
