@@ -193,22 +193,30 @@ def _probe(fd, address, deadline=0.12):
 
 def _scan_once(cache):
     found = {}
+    familial = (0x70, 0x71, 0x72, 0x73)
+    legacy = (0x39, 0x3A, 0x3B, 0x3C)
     for bus in BUSES:
         try:
             fd = os.open(f"/dev/i2c-{bus}", os.O_RDWR)
         except OSError:
             continue
         try:
-            for address in ADDRESSES:
-                hit = _probe(fd, address, 0.12)
-                for pause, deadline in ((0.01, 0.30), (0.05, 0.60)):
-                    if hit is not None:
-                        break
-                    time.sleep(pause)
-                    hit = _probe(fd, address, deadline)
+            # One quick probe decides which address family this board is using;
+            # probing the empty family costs a second per address otherwise.
+            family = None
+            for candidate in familial + legacy:
+                if _probe(fd, candidate, 0.05):
+                    family = familial if candidate in familial else legacy
+                    break
+            if family is None:
+                continue
+            for address in family:
                 key = (bus, address)
+                hit = _probe(fd, address, 0.12)
+                if hit is None and key in cache:
+                    hit = _probe(fd, address, 0.45)   # known stick: be patient
                 if hit and not (hit[0].startswith("AUDA") or hit[0].startswith("DIMM_LED")):
-                    hit = None          # garbage read; trust the remembered name
+                    hit = None
                 if hit:
                     found[key] = hit
                 elif key in cache:
