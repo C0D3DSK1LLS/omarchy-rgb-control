@@ -611,6 +611,9 @@ class Panel(Gtk.ApplicationWindow):
         save_name = Gtk.Button(label="Save name")
         save_name.connect("clicked", lambda *_: self.save_selected_key_name())
         name_row.append(save_name)
+        next_key = Gtk.Button(label="Next unnamed")
+        next_key.connect("clicked", lambda *_: self.next_unnamed_key())
+        name_row.append(next_key)
         self.kb_keys_row.append(name_row)
 
         kb_scroller = Gtk.ScrolledWindow()
@@ -1186,6 +1189,21 @@ class Panel(Gtk.ApplicationWindow):
         self.send_keyboard_frame(frame)
         self.set_status(f"Slot {slot} lit white — look which key it is")
 
+    def next_unnamed_key(self):
+        """Select and light the next unlabelled slot, ready to be named."""
+        self.show_unnamed.set_active(True)
+        for slot, label in kb_keys.KEYS:
+            if str(label).startswith("Special ") and slot not in kb_keys.load_labels():
+                self.clear_key_selection()
+                button = self.kb_key_buttons.get(slot)
+                if button is not None:
+                    self.kb_selected.add(slot)
+                    button.add_css_class("kb-selected")
+                self.light_selected_key()
+                return True
+        self.set_status("Every special key has a name")
+        return False
+
     def save_selected_key_name(self):
         if len(self.kb_selected) != 1:
             self.set_status("Select exactly one key to name it", False)
@@ -1201,6 +1219,7 @@ class Panel(Gtk.ApplicationWindow):
             button.set_label(name)
             button.set_tooltip_text(f"{name} · slot {slot}")
         self.set_status(f"Slot {slot} is now {name}")
+        self.next_unnamed_key()
 
     def clear_key_selection(self):
         for slot in list(self.kb_selected):
