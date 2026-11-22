@@ -261,6 +261,8 @@ class Panel(Gtk.ApplicationWindow):
         self.anim_thread = None
         self.anim_stop = threading.Event()
         self.animating = False
+        self.saved_state = {}
+        self.state_restored = False
 
         header = Gtk.HeaderBar()
         header.set_show_title_buttons(False)
@@ -565,6 +567,9 @@ class Panel(Gtk.ApplicationWindow):
                 f"{dev.type} · {len(dev.ram_sticks)} sticks · {dev.led_count} LEDs")
             self.zones_label.set_text(
                 "Apply writes only the selected stick; ALL writes the whole kit.")
+            if not self.state_restored:
+                self.apply_saved_state()
+                self.state_restored = True
         else:
             self.meta_label.set_text(f"{dev.type} · {len(dev.zones)} channel(s) · {dev.led_count} LED(s)")
             self.zones_label.set_text("Channels: " + (", ".join(dev.zones) if dev.zones else "none"))
@@ -670,11 +675,58 @@ class Panel(Gtk.ApplicationWindow):
             with open(temp, "w") as handle:
                 json.dump(payload, handle)
             os.replace(temp, RAM_STATE)
+            self.saved_state = payload
             self.set_status(message)
         except OSError as exc:
             self.set_status(f"Could not reach the lighting service: {exc}", False)
 
     # ------------------------------------------------------------- my effects
+    def load_saved_state(self):
+        try:
+            with open(RAM_STATE) as handle:
+                return json.load(handle)
+        except (OSError, ValueError):
+            return {}
+
+    def apply_saved_state(self):
+        """Show what the lighting service is actually running."""
+        state = self.saved_state or self.load_saved_state()
+        if not state:
+            return
+        self.saved_state = state
+        brightness = int(state.get("brightness", self.brightness))
+        self.bright.set_value(brightness)
+        mode_ids = [value for _name, value in ram.MODES]
+        speed_ids = [value for _name, value in ram.SPEEDS]
+        if state.get("kind") == "custom":
+            name = state.get("effect")
+            if name in effects.EFFECT_NAMES:
+                self.mine_dropdown.set_selected(effects.EFFECT_NAMES.index(name) + 1)
+                for button, colour in zip(self.palette_buttons, state.get("colours") or []):
+                    button.set_rgba(hex_to_rgba("#%02x%02x%02x" % tuple(colour)))
+                self.animating = True
+                self.stop_button.set_visible(True)
+        elif state.get("kind") == "hardware":
+            self.mine_dropdown.set_selected(0)
+            try:
+                self.effect_dropdown.set_selected(mode_ids.index(int(state.get("mode", 1))))
+            except ValueError:
+                pass
+            try:
+                self.speed_dropdown.set_selected(speed_ids.index(int(state.get("speed", 2))))
+            except ValueError:
+                pass
+            self.colour_button.set_rgba(hex_to_rgba(state.get("colour") or "#00ff41"))
+            self.animating = False
+            self.stop_button.set_visible(False)
+        sticks = state.get("sticks")
+        if sticks and len(sticks) == 1 and self.ram_toggles:
+            key = (int(sticks[0][0]), int(sticks[0][1]))
+            for index, stick in enumerate(self.selected.ram_sticks):
+                if (stick.bus, stick.address) == key:
+                    self.ram_toggles[index + 1].set_active(True)
+                    break
+
     def refresh_palette(self):
         """Rebuild the colour pickers for the chosen effect's palette."""
         while (child := self.palette_row.get_first_child()):
