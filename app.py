@@ -366,6 +366,15 @@ def write_devices(devices, colour, brightness, progress, cancelled, keyboard_wri
         ok, message = cli(args)
         if not ok:
             errors.append(message or "OpenRGB update failed")
+        # The MSI 185-byte controller ignores the first colour packet after the
+        # device is opened; a second identical write lands every time.
+        boards = [dev for dev in normal if dev.type.lower() == "motherboard"]
+        if boards and ok and not cancelled.is_set():
+            time.sleep(0.35)
+            retry = []
+            for dev in boards:
+                retry.extend(device_args(dev, colour, brightness))
+            cli(retry)
     for dev in rams:
         if cancelled.is_set():
             break
