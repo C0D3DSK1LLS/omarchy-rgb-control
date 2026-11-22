@@ -17,9 +17,9 @@ MAIN = (
     + [f"F{i}" for i in range(1, 13)]
     + ["Print Screen", "Scroll Lock", "Pause", "Insert", "Home", "Page Up",
        "Delete", "End", "Page Down", "Right", "Left", "Down", "Up",
-       "Num Lock", "KP /", "KP *", "KP -", "KP +", "KP Enter",
-       "KP 1", "KP 2", "KP 3", "KP 4", "KP 5", "KP 6", "KP 7", "KP 8", "KP 9",
-       "KP 0", "KP .", "Non-US \\"]
+       "Num Lock", "Num /", "Num *", "Num -", "Num +", "Num Enter",
+       "Num 1", "Num 2", "Num 3", "Num 4", "Num 5", "Num 6", "Num 7", "Num 8", "Num 9",
+       "Num 0", "Num .", "Non-US \\"]
 )
 
 CONFIRMED = {

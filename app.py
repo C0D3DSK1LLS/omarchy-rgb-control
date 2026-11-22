@@ -586,6 +586,10 @@ class Panel(Gtk.ApplicationWindow):
         deselect = Gtk.Button(label="Clear selection")
         deselect.connect("clicked", lambda *_: self.clear_key_selection())
         kb_buttons.append(deselect)
+        self.show_unnamed = Gtk.CheckButton(label="Show unnamed")
+        self.show_unnamed.set_active(False)
+        self.show_unnamed.connect("toggled", lambda *_: self.apply_unnamed_visibility())
+        kb_buttons.append(self.show_unnamed)
         fill = Gtk.Button(label="Fill all keys")
         fill.connect("clicked", lambda *_: self.fill_all_keys())
         kb_buttons.append(fill)
@@ -631,6 +635,7 @@ class Panel(Gtk.ApplicationWindow):
         self.kb_keys_row.append(kb_scroller)
         self.kb_keys_row.set_visible(False)
         right.append(self.kb_keys_row)
+        self.apply_unnamed_visibility()
         self.key_colours = {}
         self.kb_selected = set()
         self.kb_anim_pid = None
@@ -1164,6 +1169,12 @@ class Panel(Gtk.ApplicationWindow):
         for slot, button in self.kb_key_buttons.items():
             self.kb_selected.add(slot)
             button.add_css_class("kb-selected")
+
+    def apply_unnamed_visibility(self):
+        show = self.show_unnamed.get_active()
+        for slot, button in self.kb_key_buttons.items():
+            if str(button.get_label()).startswith("Special "):
+                button.set_visible(show)
 
     def light_selected_key(self):
         if len(self.kb_selected) != 1:
