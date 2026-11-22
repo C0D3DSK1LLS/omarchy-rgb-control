@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=PeaceMachine RGB Control
+GenericName=RGB Lighting
+Comment=Every LED in the box — board, fans, keyboard, GPU and mouse
+Exec=/home/jimmy/.local/bin/c0d3d-rgb-control
+Icon=preferences-color
+Terminal=false
+Categories=Settings;HardwareSettings;
+StartupWMClass=org.jimmy.RgbControl
+DBusActivatable=false

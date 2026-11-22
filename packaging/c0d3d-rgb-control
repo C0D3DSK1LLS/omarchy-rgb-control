@@ -1,0 +1,5 @@
+#!/bin/sh
+# PeaceMachine RGB Control — its own config home so the skin cannot leak.
+export XDG_CONFIG_HOME=$HOME/.local/share/c0d3d/rgb-control-config
+export GTK_THEME=Adwaita:dark
+exec /usr/bin/python3 $HOME/.local/share/c0d3d/rgb-control/app.py "$@"
