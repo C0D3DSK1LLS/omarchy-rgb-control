@@ -155,9 +155,11 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: globals().__setitem__("stopping", True))
     signal.signal(signal.SIGINT, lambda *_: globals().__setitem__("stopping", True))
     log(f"lighting service started (pid {os.getpid()})")
-    paint_keyboard()
+    try:
+        paint_keyboard()
+    except Exception as exc:  # noqa: BLE001
+        log(f"keyboard restore failed: {exc}")
     stamp = None
-    state = None
     while not stopping:
         try:
             mtime = STATE.stat().st_mtime
@@ -165,23 +167,29 @@ def main():
             mtime = None
         if mtime != stamp:
             stamp = mtime
-            state = read_state()
-            if not state:
-                log("no state file yet")
-            elif state.get("kind") == "custom":
-                if not paint_custom(state, stamp):
-                    stamp = None
-                    time.sleep(2.0)
-                continue  # the animation loop owns the clock until it changes
-            elif state.get("kind") == "hardware":
-                if not paint_hardware(state):
-                    stamp = None
-                    time.sleep(2.0)
-            elif state.get("kind") == "off":
-                sticks = chosen_sticks(state)
-                if sticks:
-                    ram.set_effect(sticks, 0, "#000000", 0, 2)
-                log("off")
+            try:
+                state = read_state()
+                if not state:
+                    log("no state file yet")
+                elif state.get("kind") == "custom":
+                    if not paint_custom(state, stamp):
+                        stamp = None
+                        time.sleep(2)
+                    continue
+                elif state.get("kind") == "hardware":
+                    if not paint_hardware(state):
+                        stamp = None
+                        time.sleep(2)
+                elif state.get("kind") == "off":
+                    sticks = chosen_sticks(state)
+                    if sticks:
+                        ram.set_effect(sticks, 0, "#000000", 0, 2)
+                    log("off")
+            except Exception as exc:  # noqa: BLE001
+                # Never die in a restart loop: log it, wait, try again.
+                log(f"apply failed: {exc}")
+                stamp = None
+                time.sleep(2)
         time.sleep(POLL)
     log("lighting service stopping")
 

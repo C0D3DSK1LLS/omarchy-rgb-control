@@ -37,8 +37,8 @@ REG_APPLY = 0x80A0
 MODE_STATIC = 1
 APPLY = 1
 REG_SPEED = 0x8022
-BUSES = (7, 8)
-ADDRESSES = (0x39, 0x3A, 0x3B, 0x3C)
+BUSES = (6, 7, 8)
+ADDRESSES = tuple(range(0x30, 0x78))
 
 # G.Skill's own effect names, in their own order, mapped one-to-one onto the
 # ENE mode register (the order matches exactly: mode 1 .. 14).
@@ -234,10 +234,15 @@ def _scaled(hex_colour, brightness):
 def prepare_direct(sticks):
     """Put the sticks into direct per-LED mode once, ready for frames."""
     for stick in sticks:
-        fd = os.open(f"/dev/i2c-{stick.bus}", os.O_RDWR)
+        try:
+            fd = os.open(f"/dev/i2c-{stick.bus}", os.O_RDWR)
+        except OSError:
+            continue
         try:
             _write(fd, stick.address, REG_DIRECT, 0)
             _write(fd, stick.address, REG_MODE, MODE_STATIC)
+        except OSError:
+            continue
         finally:
             os.close(fd)
 
@@ -258,7 +263,10 @@ def write_frame(sticks, frames, brightness=100, previous=None):
                    if old is None or led >= len(old) or old[led] != colour]
         if not changes:
             continue
-        fd = os.open(f"/dev/i2c-{stick.bus}", os.O_RDWR)
+        try:
+            fd = os.open(f"/dev/i2c-{stick.bus}", os.O_RDWR)
+        except OSError:
+            continue
         try:
             for led, (red, green, blue) in changes:
                 base = REG_COLORS_EFFECT + 3 * led
@@ -266,6 +274,8 @@ def write_frame(sticks, frames, brightness=100, previous=None):
                 _write(fd, stick.address, base + 1, blue)
                 _write(fd, stick.address, base + 2, green)
             _write(fd, stick.address, REG_APPLY, APPLY)
+        except OSError:
+            continue
         finally:
             os.close(fd)
     return scaled
@@ -278,9 +288,15 @@ def set_effect(sticks, mode, hex_colour, brightness=100, speed=2):
     red, green, blue = _scaled(hex_colour, brightness)
     painted = 0
     for stick in sticks:
-        fd = os.open(f"/dev/i2c-{stick.bus}", os.O_RDWR)
         try:
-            _write(fd, stick.address, REG_DIRECT, 0)      # effect mode
+            fd = os.open(f"/dev/i2c-{stick.bus}", os.O_RDWR)
+        except OSError:
+            continue
+        try:
+            try:
+                _write(fd, stick.address, REG_DIRECT, 0)      # effect mode
+            except OSError:
+                continue
             if mode == 1:
                 # Static keeps a colour per LED.
                 slots = stick.leds
@@ -298,6 +314,8 @@ def set_effect(sticks, mode, hex_colour, brightness=100, speed=2):
             _write(fd, stick.address, REG_MODE, mode)
             _write(fd, stick.address, REG_SPEED, max(0, min(4, speed)))
             _write(fd, stick.address, REG_APPLY, APPLY)
+        except OSError:
+            continue
         finally:
             os.close(fd)
         painted += 1
