@@ -17,6 +17,7 @@ Protocol (from OpenRGB's ENE SMBus driver, verified on this box):
 import ctypes
 import fcntl
 import os
+import time
 
 I2C_SLAVE = 0x0703
 I2C_SMBUS = 0x0720
@@ -123,6 +124,32 @@ class Stick:
         return f"{self.label} ({self.where})"
 
 
+_KNOWN = {}
+
+
+def _probe(fd, address, deadline=1.0):
+    """Read a stick's identity, retrying while the iMC engine is sulking."""
+    limit = time.monotonic() + deadline
+    while True:
+        try:
+            raw = bytes(_read(fd, address, REG_DEVICE_NAME + offset) for offset in range(16))
+            name = raw.split(b"\x00")[0].decode("ascii", "replace").strip()
+            if name and all(32 <= ord(ch) < 127 for ch in name):
+                leds = 8
+                for _ in range(3):
+                    try:
+                        leds = _read(fd, address, REG_LED_COUNT) or 8
+                        break
+                    except OSError:
+                        time.sleep(0.005)
+                return name, min(leds, 16)
+        except OSError:
+            pass
+        if time.monotonic() >= limit:
+            return None
+        time.sleep(0.01)
+
+
 def find_sticks():
     """Every ENE DRAM controller on the memory buses, in bus/address order."""
     sticks = []
@@ -134,18 +161,20 @@ def find_sticks():
             continue
         try:
             for address in ADDRESSES:
-                try:
-                    raw = bytes(_read(fd, address, REG_DEVICE_NAME + offset)
-                                for offset in range(16))
-                    name = raw.split(b"\x00")[0].decode("ascii", "replace").strip()
-                    if not name or not all(32 <= ord(ch) < 127 for ch in name):
-                        continue
-                    if not (name.startswith("AUDA") or name.startswith("DIMM_LED")):
-                        continue
-                    leds = _read(fd, address, REG_LED_COUNT) or 8
-                except OSError:
+                found = _probe(fd, address)
+                key = (bus, address)
+                if found:
+                    _KNOWN[key] = found
+                elif key in _KNOWN:
+                    # A NAK during a scan must not make a stick disappear.
+                    found = _KNOWN[key]
+                if not found:
                     continue
-                sticks.append(Stick(len(sticks) + 1, bus, address, name, min(leds, 16)))
+                name, leds = found
+                if not (name.startswith("AUDA") or name.startswith("DIMM_LED")):
+                    continue
+                sticks.append(Stick(len(sticks) + 1, bus, address, name, leds))
+                time.sleep(0.003)
         finally:
             os.close(fd)
     return sticks
@@ -158,6 +187,46 @@ def _scaled(hex_colour, brightness):
     red, green, blue = (int(value[i:i + 2], 16) for i in (0, 2, 4))
     level = max(0, min(100, int(brightness))) / 100.0
     return (int(red * level + 0.5), int(green * level + 0.5), int(blue * level + 0.5))
+
+
+def prepare_direct(sticks):
+    """Put the sticks into direct per-LED mode once, ready for frames."""
+    for stick in sticks:
+        fd = os.open(f"/dev/i2c-{stick.bus}", os.O_RDWR)
+        try:
+            _write(fd, stick.address, REG_DIRECT, 0)
+            _write(fd, stick.address, REG_MODE, MODE_STATIC)
+        finally:
+            os.close(fd)
+
+
+def write_frame(sticks, frames, brightness=100, previous=None):
+    """Push one animation frame.
+
+    frames[i] is a list of (r, g, b) for sticks[i]. When `previous` holds the
+    last frame, only LEDs whose colour actually changed are written - that is
+    what keeps slow effects at a smooth rate on a shared SMBus.
+    """
+    level = max(0, min(100, int(brightness))) / 100.0
+    scaled = [[(int(red * level), int(green * level), int(blue * level))
+               for red, green, blue in column] for column in frames]
+    for index, (stick, colours) in enumerate(zip(sticks, scaled)):
+        old = previous[index] if previous and index < len(previous) else None
+        changes = [(led, colour) for led, colour in enumerate(colours[:stick.leds])
+                   if old is None or led >= len(old) or old[led] != colour]
+        if not changes:
+            continue
+        fd = os.open(f"/dev/i2c-{stick.bus}", os.O_RDWR)
+        try:
+            for led, (red, green, blue) in changes:
+                base = REG_COLORS_EFFECT + 3 * led
+                _write(fd, stick.address, base, red)
+                _write(fd, stick.address, base + 1, blue)
+                _write(fd, stick.address, base + 2, green)
+            _write(fd, stick.address, REG_APPLY, APPLY)
+        finally:
+            os.close(fd)
+    return scaled
 
 
 def set_effect(sticks, mode, hex_colour, brightness=100, speed=2):

@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import gi
@@ -23,21 +24,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import orbg  # noqa: E402
 import ram  # noqa: E402
+import effects  # noqa: E402
 
 APP_ID = "org.jimmy.RgbControl"
 OPENRGB = "/usr/local/bin/openrgb"
 OPENRGB_CONFIG = os.path.join(HERE, "openrgb-config")
 K70_NAME = "Corsair K70 RGB PRO Optical-Mechanical"
 STATE = os.path.join(HERE, "state.json")
-
-PRESETS = [
-    ("Matrix", "#00ff41"),
-    ("Crimson", "#dc143c"),
-    ("Ice", "#8fd6ff"),
-    ("Amber", "#ffa500"),
-    ("White", "#ffffff"),
-    ("Off", "#000000"),
-]
 
 # per-zone LED counts for the MSI board. The CLI's total is unreliable because
 # it re-reads its own saved zone sizes, so each zone is written by its own count.
@@ -68,6 +61,11 @@ def hex_to_tuple(value):
     if len(value) != 6:
         value = "00ff41"
     return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def rgba_to_tuple(rgba):
+    return (int(rgba.red * 255 + 0.5), int(rgba.green * 255 + 0.5),
+            int(rgba.blue * 255 + 0.5))
 
 
 class Device:
@@ -132,6 +130,15 @@ def parse_devices():
     # its DRAM entries are dropped and one native "RAM" entry takes their place.
     devices = [dev for dev in devices if dev.type.upper() != "DRAM" or dev.keyboard]
     sticks = ram.find_sticks()
+    # The iMC bus occasionally NAKs a controller mid-scan; one more pass
+    # usually brings the full kit back rather than losing a stick until Rescan.
+    for _ in range(2):
+        if len(sticks) >= 8:
+            break
+        time.sleep(0.2)
+        more = ram.find_sticks()
+        if len(more) > len(sticks):
+            sticks = more
     if sticks:
         group = Device(None, "RAM")
         group.type = "DRAM"
@@ -250,6 +257,9 @@ class Panel(Gtk.ApplicationWindow):
         self.connect("close-request", self.on_close)
         self.colour_hex = "#00ff41"
         self.brightness = 80
+        self.anim_thread = None
+        self.anim_stop = threading.Event()
+        self.animating = False
 
         header = Gtk.HeaderBar()
         header.set_show_title_buttons(False)
@@ -363,14 +373,39 @@ class Panel(Gtk.ApplicationWindow):
         self.speed_row.append(self.speed_dropdown)
         self.speed_row.set_visible(False)
         right.append(self.speed_row)
+
+        # My own effects: software-driven frames rather than chip modes.
+        self.mine_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        mine_lbl = Gtk.Label(label="MY EFFECTS")
+        mine_lbl.add_css_class("eyebrow")
+        self.mine_row.append(mine_lbl)
+        self.mine_dropdown = Gtk.DropDown.new_from_strings(["None"] + effects.EFFECT_NAMES)
+        self.mine_dropdown.set_selected(0)
+        self.mine_row.append(self.mine_dropdown)
+        self.mine_row.set_visible(False)
+        right.append(self.mine_row)
+        self.mine_dropdown.connect("notify::selected", lambda *_: self.refresh_palette())
+
+        # One colour picker per slot the chosen effect declares.
+        self.palette_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+        self.palette_row.set_visible(False)
+        right.append(self.palette_row)
+        self.palette_buttons = []
+
         self.ram_choice = 0
         self.ram_syncing = False
         self.ram_toggles = []
 
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         apply = Gtk.Button(label="Apply to this device")
         apply.add_css_class("apply")
         apply.connect("clicked", lambda *_: self.apply_selected())
-        right.append(apply)
+        buttons.append(apply)
+        self.stop_button = Gtk.Button(label="Stop effect")
+        self.stop_button.connect("clicked", lambda *_: self.stop_animation())
+        self.stop_button.set_visible(False)
+        buttons.append(self.stop_button)
+        right.append(buttons)
         self.apply_button = apply
         self.actions.append(apply)
 
@@ -384,18 +419,6 @@ class Panel(Gtk.ApplicationWindow):
         spacer.set_vexpand(True)
         right.append(spacer)
         paned.set_end_child(right)
-
-        presets = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        pcap = Gtk.Label(label="EVERYTHING")
-        pcap.add_css_class("eyebrow")
-        presets.append(pcap)
-        for name, colour in PRESETS:
-            b = Gtk.Button(label=name)
-            b.add_css_class("preset")
-            b.connect("clicked", lambda _b, c=colour: self.apply_everything(c))
-            presets.append(b)
-            self.actions.append(b)
-        root.append(presets)
 
         self.status = Gtk.Label(label="Starting…")
         self.status.set_xalign(0)
@@ -425,6 +448,7 @@ class Panel(Gtk.ApplicationWindow):
     def on_close(self, *_args):
         self.closed = True
         self.cancelled.set()
+        self.stop_animation()
         if self.keepalive_source is not None:
             GLib.source_remove(self.keepalive_source)
             self.keepalive_source = None
@@ -553,6 +577,8 @@ class Panel(Gtk.ApplicationWindow):
         self.ram_choice = 0
         self.effect_row.set_visible(bool(dev.ram_sticks))
         self.speed_row.set_visible(bool(dev.ram_sticks))
+        self.mine_row.set_visible(bool(dev.ram_sticks))
+        self.refresh_palette()
         if not dev.ram_sticks:
             self.ram_row.set_visible(False)
             return
@@ -606,6 +632,13 @@ class Panel(Gtk.ApplicationWindow):
             sticks = dev.ram_sticks
             if self.ram_choice > 0:
                 sticks = [sticks[self.ram_choice - 1]]
+            custom = self.mine_dropdown.get_selected()
+            if custom > 0:
+                name = effects.EFFECT_NAMES[custom - 1]
+                self.start_animation(name, sticks, int(self.bright.get_value()),
+                                     self.palette_colours())
+                return
+            self.stop_animation()
             target = Device(None, sticks[0].label if len(sticks) == 1 else "RAM")
             target.type = "DRAM"
             target.ram_sticks = sticks
@@ -613,7 +646,94 @@ class Panel(Gtk.ApplicationWindow):
             target.ram_speed = ram.SPEEDS[self.speed_dropdown.get_selected()][1]
             self.start_apply([target], rgb_to_hex(self.colour_button.get_rgba()))
             return
+        self.stop_animation()
         self.start_apply([dev], rgb_to_hex(self.colour_button.get_rgba()))
+
+    # ------------------------------------------------------------- my effects
+    def refresh_palette(self):
+        """Rebuild the colour pickers for the chosen effect's palette."""
+        while (child := self.palette_row.get_first_child()):
+            self.palette_row.remove(child)
+        self.palette_buttons = []
+        choice = self.mine_dropdown.get_selected()
+        dev = self.selected
+        if not (dev and dev.ram_sticks) or choice <= 0:
+            self.palette_row.set_visible(False)
+            return
+        name = effects.EFFECT_NAMES[choice - 1]
+        _effect, defaults, labels = effects.BY_NAME[name]
+        for label, default in zip(labels, defaults):
+            cell = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+            caption = Gtk.Label(label=label.upper())
+            caption.add_css_class("eyebrow")
+            caption.set_xalign(0)
+            cell.append(caption)
+            button = Gtk.ColorDialogButton(dialog=Gtk.ColorDialog())
+            button.set_rgba(hex_to_rgba("#%02x%02x%02x" % tuple(default)))
+            cell.append(button)
+            self.palette_row.append(cell)
+            self.palette_buttons.append(button)
+        self.palette_row.set_visible(True)
+
+    def palette_colours(self):
+        return [rgba_to_tuple(button.get_rgba()) for button in self.palette_buttons]
+
+    def start_animation(self, name, sticks, brightness, colours):
+        self.stop_animation()
+        if not sticks:
+            return
+        effect = effects.BY_NAME[name][0]
+        palette = list(colours or [])
+        level = int(brightness)
+        self.anim_stop.clear()
+        self.animating = True
+        self.stop_button.set_visible(True)
+        self.set_status(f"{name} running on {len(sticks)} stick(s) at {level}%")
+
+        def loop():
+            try:
+                ram.prepare_direct(sticks)
+                started = time.monotonic()
+                due = started
+                last = None
+                while not self.anim_stop.is_set():
+                    moment = time.monotonic() - started
+                    try:
+                        frame = effect(moment, len(sticks), sticks[0].leds, palette)
+                        with self.hardware_lock:
+                            last = ram.write_frame(sticks, frame, level, last)
+                    except Exception as exc:  # noqa: BLE001
+                        self.post_status(f"{name}: {exc}")
+                        break
+                    due += 1 / 20
+                    delay = due - time.monotonic()
+                    if delay > 0:
+                        self.anim_stop.wait(delay)
+                    else:
+                        due = time.monotonic()
+            finally:
+                def finished():
+                    self.animating = False
+                    if not self.closed:
+                        self.stop_button.set_visible(False)
+                    return False
+                GLib.idle_add(finished)
+
+        self.anim_thread = threading.Thread(target=loop, name="rgb-effect", daemon=True)
+        self.anim_thread.start()
+
+    def stop_animation(self):
+        thread = self.anim_thread
+        if thread is None:
+            return False
+        self.anim_stop.set()
+        if thread is not threading.current_thread():
+            thread.join(timeout=1.5)
+        self.anim_thread = None
+        self.animating = False
+        if getattr(self, "stop_button", None) is not None:
+            self.stop_button.set_visible(False)
+        return True
 
     def start_apply(self, devices, colour):
         if self.busy or not devices:
@@ -638,12 +758,6 @@ class Panel(Gtk.ApplicationWindow):
             ok, message = result
             self.set_status(message, ok)
         self.run_job("Applying colours…", work, finish)
-
-    def apply_everything(self, colour):
-        if self.busy:
-            return
-        self.colour_button.set_rgba(hex_to_rgba(colour))
-        self.start_apply(self.devices, colour)
 
     # ----------------------------------------------------------------- chrome
     def set_status(self, text, ok=True):
