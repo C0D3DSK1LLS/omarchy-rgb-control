@@ -1,0 +1,150 @@
+/* PeaceMachine RGB Control — house skin: black, crimson headings, green controls. */
+
+window {
+  background-color: #040404;
+}
+
+headerbar {
+  background-image: linear-gradient(180deg, #0a130d, #050807);
+  border-bottom: 1px solid #14351f;
+  box-shadow: inset 0 1px 0 rgba(0, 255, 65, 0.10);
+  margin-right: 104px;
+}
+
+.app-title {
+  color: #dc143c;
+  font-weight: 800;
+  letter-spacing: 0.22em;
+  font-size: 13px;
+}
+
+.eyebrow {
+  color: #c9184a;
+  font-size: 10px;
+  letter-spacing: 0.26em;
+  font-weight: 700;
+  margin-top: 4px;
+}
+
+.device-title {
+  color: #c9ffd2;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.device-meta {
+  color: #6f9b79;
+  font-size: 11px;
+}
+
+zone-name,
+.zone-name {
+  color: #c9ffd2;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.device-name {
+  color: #dc143c;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.device-sub {
+  color: #6f9b79;
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+}
+
+list {
+  background: #000000;
+  border: 1px solid #14351f;
+  border-radius: 10px;
+}
+
+list > row {
+  background: transparent;
+  border-bottom: 1px solid #0f2a17;
+  padding: 2px 8px;
+}
+
+list > row:hover {
+  background: #0b1a10;
+}
+
+list > row:selected {
+  background: linear-gradient(90deg, #14220f, #0a130d);
+  box-shadow: inset 3px 0 0 #00ff41;
+}
+
+button {
+  background-image: none;
+  background-color: #0a130d;
+  border: 1px solid #1d3b25;
+  border-radius: 9px;
+  color: #dcffe4;
+  padding: 3px 10px;
+  min-height: 0;
+}
+
+button:hover {
+  border-color: #00ff41;
+  color: #dc143c;
+  box-shadow: 0 0 12px rgba(0, 255, 65, 0.12);
+}
+
+button.apply {
+  border-color: #2a5c3a;
+  font-weight: 600;
+}
+
+button.preset {
+  padding: 2px 12px;
+  border-color: #17301f;
+}
+
+dropdown > button {
+  color: #dcffe4;
+  border-color: #1d3b25;
+  background-color: #060d09;
+  min-height: 0;
+  padding: 2px 8px;
+}
+
+scale trough {
+  background: #0d1a12;
+  min-height: 6px;
+  border-radius: 999px;
+}
+
+scale highlight {
+  background: linear-gradient(90deg, #0b7a2a, #00ff41);
+  border-radius: 999px;
+}
+
+scale slider {
+  background: #dc143c;
+  min-width: 14px;
+  min-height: 14px;
+  border-radius: 999px;
+}
+
+colordialogbutton button {
+  min-width: 34px;
+  min-height: 26px;
+}
+
+.status {
+  color: #6f9b79;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  padding-top: 2px;
+}
+
+.status.bad {
+  color: #ff5568;
+}
+
+aboutdialog {
+  background-color: #040404;
+}
