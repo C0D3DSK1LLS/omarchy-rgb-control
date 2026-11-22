@@ -3,9 +3,18 @@
 Control of the board, GPU and mouse through the OpenRGB CLI, plus the K70
 Optical keyboard's capture-backed native HID sender.
 
-Addressable zones are resized to 30 LEDs before a frame. Keyboard brightness
-uses OpenRGB; its colour picker and presets use `kb-colour.py`. Presets update
-the keyboard last so later OpenRGB initialization cannot reset its mode.
+Addressable zones are resized to 30 LEDs before a frame. Keyboard colour and
+brightness both use `kb-colour.py`; brightness scales the key RGB values. The
+panel's isolated `openrgb-config` disables just the K70 Optical detector, while
+preserving its other existing OpenRGB settings, so scans and other device
+updates do not reset the keyboard to its stored red profile. `--noautoconnect`
+prevents using another server's detector configuration.
+
+Scan and apply run on one worker thread. GTK receives completion/progress through
+GLib callbacks; buttons are disabled during a job, with an activity spinner.
+All normal devices/zones are batched into one OpenRGB command. Errors are shown
+instead of silently reporting success. Closing cancels remaining stages; the
+current child is reaped when it finishes or reaches its timeout (up to 25s).
 
 Run with `c0d3d-rgb-control` or from the menu as **PeaceMachine RGB Control**.
 
@@ -57,3 +66,9 @@ No boot profile is saved. Do not run concurrent writers against the keyboard.
 The development sandbox exposes sysfs but no /dev/hidraw devices, so the
 standalone hardware test was run by C0D3D. Offline panel checks cover routing,
 colour arguments, brightness ordering and failed-command reporting.
+
+Regression checks: `python3 test_rgb_control.py` exercises the actual GLib loop
+with deliberately delayed hardware substitutes (no hardware writes or windows).
+Covers slow scan, individual/preset apply, duplicate clicks, error recovery,
+brightness routing, keyboard exclusion, batching and closing during work.
+Real GUI rendering could not be checked here: sandbox blocks X11/D-Bus sockets.

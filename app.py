@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """PeaceMachine RGB Control — every LED in the box from one window.
 
-Talks to a running `openrgb --server` through the SDK (see orbg.py) instead of
-shelling out: the CLI re-opens every device on each run, which wipes whatever was
-applied to the other channels, and that is what kept knocking colours out.
-
-The K70 Optical keyboard uses the capture-backed HID sender for colour and
-OpenRGB for brightness. Apply it last because OpenRGB can reset its mode.
+OpenRGB handles the board, GPU and mouse. The K70 Optical has its own native
+HID sender; OpenRGB detection for that model is disabled in this app's config.
+All hardware work runs on one worker, never GTK's main thread.
 """
 import json
 import os
 import re
 import subprocess
 import sys
+import threading
+from pathlib import Path
 
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, Gtk, Pango  # noqa: E402
+from gi.repository import Gdk, GLib, Gtk, Pango  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -26,6 +25,8 @@ import orbg  # noqa: E402
 
 APP_ID = "org.jimmy.RgbControl"
 OPENRGB = "/usr/local/bin/openrgb"
+OPENRGB_CONFIG = os.path.join(HERE, "openrgb-config")
+K70_NAME = "Corsair K70 RGB PRO Optical-Mechanical"
 STATE = os.path.join(HERE, "state.json")
 
 PRESETS = [
@@ -81,10 +82,13 @@ class Device:
 
 def parse_devices():
     try:
-        out = subprocess.run([OPENRGB, "--list-detailed"], capture_output=True,
-                             text=True, timeout=25).stdout
-    except Exception:
-        return []
+        result = subprocess.run([OPENRGB, "--config", OPENRGB_CONFIG, "--noautoconnect", "--list-detailed"],
+                                capture_output=True, text=True, timeout=25)
+        if result.returncode:
+            raise RuntimeError((result.stderr or result.stdout).strip() or "Device scan failed")
+        out = result.stdout
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Device scan timed out") from exc
     devices, cur = [], None
     for raw in out.splitlines():
         m = re.match(r"^(\d+): (.*)$", raw)
@@ -104,13 +108,28 @@ def parse_devices():
             cur.modes = [m.strip("'[]") for m in re.findall(r"'[^']*'|\[[^\]]*\]|\S+", line[6:])]
         elif line.startswith("LEDs:"):
             cur.led_count = len(re.findall(r"'[^']*'|\S+", line[5:]))
+    # Native keyboard discovery does not open/reset the keyboard.
+    for node in Path("/sys/class/hidraw").glob("hidraw*"):
+        try:
+            identity = (node / "device/uevent").read_text()
+            descriptor = (node / "device/report_descriptor").read_bytes()
+        except OSError:
+            continue
+        if ("HID_ID=0003:00001B1C:00001BC6" in identity
+                and descriptor.startswith(bytes.fromhex("06 42 ff 09 01 a1 01"))):
+            keyboard = Device(-1, K70_NAME)
+            keyboard.type, keyboard.keyboard = "Keyboard", True
+            keyboard.zones, keyboard.led_count = ["Keyboard"], 111
+            devices.append(keyboard)
+            break
     return devices
 
 
 def cli(args):
     try:
-        r = subprocess.run([OPENRGB] + args, capture_output=True, text=True, timeout=25)
-        return r.returncode == 0, (r.stdout + r.stderr).strip()
+        r = subprocess.run([OPENRGB, "--config", OPENRGB_CONFIG, "--noautoconnect"] + args, capture_output=True, text=True, timeout=25)
+        message = (r.stdout + r.stderr).strip()
+        return r.returncode == 0 and not re.search(r"(?im)^\s*Error:", message), message
     except Exception as exc:
         return False, str(exc)
 
@@ -119,14 +138,52 @@ def is_k70_optical(dev):
     return dev.keyboard and "k70 rgb pro optical" in dev.name.lower()
 
 
-def keyboard_colour(colour):
+def keyboard_colour(colour, brightness=100):
     try:
         result = subprocess.run(
-            [sys.executable, os.path.join(HERE, "kb-colour.py"), colour.lstrip("#")],
+            [sys.executable, os.path.join(HERE, "kb-colour.py"), colour.lstrip("#"), "--brightness", str(brightness)],
             capture_output=True, text=True, timeout=15)
         return result.returncode == 0, (result.stdout + result.stderr).strip()
     except Exception as exc:
         return False, str(exc)
+
+
+def device_args(dev, colour, brightness):
+    known = [z.lower().replace(" ", "") for z in dev.zones]
+    args = []
+    if not dev.keyboard and known and all(key in ZONE_LEDS for key in known):
+        for index, key in enumerate(known):
+            args += ["-d", dev.name, "-z", str(index)]
+            if key in ADDRESSABLE:
+                args += ["-sz", str(ADDRESSABLE_LEN)]
+            args += ["-m", "Static", "-c", colour.lstrip("#"), "-b", str(brightness)]
+    else:
+        args = ["-d", dev.name, "-m", "Static", "-c", colour.lstrip("#"), "-b", str(brightness)]
+    return args
+
+
+def write_devices(devices, colour, brightness, progress, cancelled):
+    errors = []
+    normal = [dev for dev in devices if not is_k70_optical(dev)]
+    if normal and not cancelled.is_set():
+        progress("Applying " + ", ".join(dev.name for dev in normal) + "…")
+        args = []
+        for dev in normal:
+            args.extend(device_args(dev, colour, brightness))
+        ok, message = cli(args)
+        if not ok:
+            errors.append(message or "OpenRGB update failed")
+    for dev in devices:
+        if is_k70_optical(dev) and not cancelled.is_set():
+            progress("Applying keyboard colour…")
+            ok, message = keyboard_colour(colour, brightness)
+            if not ok:
+                errors.append(message or "Keyboard update failed")
+    if cancelled.is_set():
+        return False, "Cancelled"
+    if errors:
+        return False, " · ".join(error.splitlines()[-1] for error in errors)
+    return True, f"Applied {colour} at {brightness}%"
 
 
 class Panel(Gtk.ApplicationWindow):
@@ -136,6 +193,11 @@ class Panel(Gtk.ApplicationWindow):
         self.devices = []
         self.selected = None
         self.client = None
+        self.busy = False
+        self.closed = False
+        self.cancelled = threading.Event()
+        self.actions = []
+        self.connect("close-request", self.on_close)
         self.colour_hex = "#00ff41"
         self.brightness = 80
 
@@ -147,6 +209,7 @@ class Panel(Gtk.ApplicationWindow):
         rescan = Gtk.Button(label="Rescan")
         rescan.connect("clicked", lambda *_: self.scan())
         header.pack_start(rescan)
+        self.actions.append(rescan)
         about = Gtk.Button(label="About")
         about.connect("clicked", lambda *_: self.show_about())
         header.pack_end(about)
@@ -216,6 +279,7 @@ class Panel(Gtk.ApplicationWindow):
         apply.add_css_class("apply")
         apply.connect("clicked", lambda *_: self.apply_selected())
         right.append(apply)
+        self.actions.append(apply)
 
         self.zones_label = Gtk.Label(label="")
         self.zones_label.set_xalign(0)
@@ -237,25 +301,79 @@ class Panel(Gtk.ApplicationWindow):
             b.add_css_class("preset")
             b.connect("clicked", lambda _b, c=colour: self.apply_everything(c))
             presets.append(b)
+            self.actions.append(b)
         root.append(presets)
 
         self.status = Gtk.Label(label="Starting…")
         self.status.set_xalign(0)
         self.status.add_css_class("status")
-        root.append(self.status)
+        activity = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.spinner = Gtk.Spinner()
+        activity.append(self.spinner)
+        activity.append(self.status)
+        self.status.set_ellipsize(Pango.EllipsizeMode.END)
+        self.status.set_hexpand(True)
+        activity.set_hexpand(True)
+        root.append(activity)
 
-        self.scan()
+        GLib.idle_add(self.scan)
 
     # ------------------------------------------------------------------ state
-    def connect(self):
-        # Deliberately no OpenRGB server: a running server holds the board open
-        # and the command-line writes then land nowhere. CLI only.
-        return None
+    def on_close(self, *_args):
+        self.closed = True
+        self.cancelled.set()
+        return False
+
+    def set_busy(self, busy):
+        self.busy = busy
+        for action in self.actions:
+            action.set_sensitive(not busy)
+        self.colour_button.set_sensitive(not busy)
+        self.bright.set_sensitive(not busy)
+        self.spinner.set_spinning(busy)
+        self.spinner.set_visible(busy)
+
+    def post_status(self, message):
+        def deliver():
+            if not self.closed:
+                self.set_status(message)
+            return False
+        GLib.idle_add(deliver)
+
+    def run_job(self, message, work, finish):
+        if self.busy or self.closed:
+            return False
+        self.set_busy(True)
+        self.set_status(message)
+        def worker():
+            try:
+                result, error = work(), None
+            except Exception as exc:
+                result, error = None, str(exc)
+            def done():
+                if not self.closed:
+                    self.set_busy(False)
+                    if error:
+                        self.set_status(error, False)
+                    else:
+                        finish(result)
+                return False
+            GLib.idle_add(done)
+        # Non-daemon: any in-flight subprocess is reaped before process exit.
+        threading.Thread(target=worker, name="rgb-hardware").start()
+        return False
 
     def scan(self):
+        return self.run_job("Scanning devices…", parse_devices, self.show_devices)
+
+    def show_devices(self, devices):
+        self.selected = None
         while (child := self.listbox.get_first_child()):
             self.listbox.remove(child)
-        self.devices = parse_devices()
+        self.devices = devices
+        self.title_label.set_text("Select a device")
+        self.meta_label.set_text("")
+        self.zones_label.set_text("")
         for dev in self.devices:
             row = Gtk.ListBoxRow()
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
@@ -289,64 +407,37 @@ class Panel(Gtk.ApplicationWindow):
 
     # ------------------------------------------------------------------ apply
     def apply_selected(self):
-        if self.selected:
+        if self.selected and not self.busy:
             self.apply_device(self.selected)
 
     def apply_device(self, dev):
-        colour = rgb_to_hex(self.colour_button.get_rgba())
+        self.start_apply([dev], rgb_to_hex(self.colour_button.get_rgba()))
+
+    def start_apply(self, devices, colour):
+        if self.busy or not devices:
+            return
+        # GTK values are copied here; worker code never touches a widget.
         self.colour_hex = colour
         self.brightness = int(self.bright.get_value())
-
-        if dev.keyboard:
-            if is_k70_optical(dev):
-                # Brightness works through OpenRGB; colour needs the actual
-                # optical keyboard protocol. Run HID last, after CLI teardown.
-                ok, msg = cli(["-d", dev.name, "-b", str(self.brightness)])
-                if ok:
-                    ok, msg = keyboard_colour(colour)
-                self.set_status(f"{dev.name}: {colour} at {self.brightness}%" if ok else
-                                f"{dev.name}: {msg.splitlines()[-1] if msg else 'failed'}", ok)
-                return ok
-            ok, msg = cli(["-d", dev.name, "-m", "Static", "-c", colour.lstrip("#"),
-                           "-b", str(self.brightness)])
-            self.set_status(f"{dev.name}: hardware Static {colour}" if ok else
-                            f"{dev.name}: {msg.splitlines()[-1] if msg else 'failed'}", ok)
-            return ok
-
-        known = [z.lower().replace(" ", "") for z in dev.zones]
-        ok = True
-        if known and all(k in ZONE_LEDS for k in known):
-            for zi, key in enumerate(known):
-                args = ["-d", dev.name, "-z", str(zi)]
-                if key in ADDRESSABLE:
-                    args += ["-sz", str(ADDRESSABLE_LEN)]
-                args += ["-m", "static", "-c", colour.lstrip("#"), "-b", str(self.brightness)]
-                good, msg = cli(args)
-                ok = ok and good
-        else:
-            ok, msg = cli(["-d", dev.name, "-m", "Static", "-c", colour.lstrip("#"),
-                           "-b", str(self.brightness)])
-        self.set_status(f"{dev.name}: {colour}" if ok else
-                        f"{dev.name}: {msg.splitlines()[-1] if msg else 'failed'}", ok)
-        return ok
+        brightness = self.brightness
+        devices = list(devices)
+        def work():
+            return write_devices(devices, colour, brightness, self.post_status, self.cancelled)
+        def finish(result):
+            ok, message = result
+            self.set_status(message, ok)
+        self.run_job("Applying colours…", work, finish)
 
     def apply_everything(self, colour):
-        rgba = hex_to_rgba(colour)
-        self.colour_button.set_rgba(rgba)
-        failed = []
-        # OpenRGB scans can reset the keyboard's software mode. Finish its HID
-        # update after every OpenRGB command, regardless of enumeration order.
-        for dev in sorted(self.devices, key=is_k70_optical):
-            if not self.apply_device(dev):
-                failed.append(dev.name)
-        if failed:
-            self.set_status("Failed: " + ", ".join(failed), False)
-        else:
-            self.set_status(f"Every device set to {colour} at {self.brightness}%")
+        if self.busy:
+            return
+        self.colour_button.set_rgba(hex_to_rgba(colour))
+        self.start_apply(self.devices, colour)
 
     # ----------------------------------------------------------------- chrome
     def set_status(self, text, ok=True):
         self.status.set_text(text)
+        self.status.set_tooltip_text(text)
         self.status.remove_css_class("bad")
         if not ok:
             self.status.add_css_class("bad")

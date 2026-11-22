@@ -115,6 +115,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('colour', nargs='?', default='00FF41', help='RRGGBB')
     parser.add_argument('--self-test', action='store_true', help='check capture fixtures without opening hardware')
+    parser.add_argument('--brightness', type=int, default=100, choices=range(101), metavar='0-100',
+                        help='scale key RGB values without another RGB controller')
     parser.add_argument('--restore', action='store_true', help='return to the stored hardware lighting profile')
     args = parser.parse_args()
     if args.self_test:
@@ -127,6 +129,7 @@ def main():
         rgb = bytes.fromhex(colour)
     except ValueError:
         parser.error('colour must contain six hexadecimal digits')
+    rgb = bytes(round(channel * args.brightness / 100) for channel in rgb)
     path = control_path()
     if not path.exists():
         raise RuntimeError(f'{path} is not available here; run this command in your host terminal')
@@ -142,7 +145,7 @@ def main():
             exchange(fd, bytes.fromhex('08 01 03 00 01').ljust(1024, b'\0'))
             print('Hardware profile requested and accepted.')
             return 0
-        print(f'{path}: requesting #{colour.upper()} using captured iCUE lighting setup', flush=True)
+        print(f'{path}: requesting #{colour.upper()} at {args.brightness}% using captured iCUE lighting setup', flush=True)
         for number, packet in capture_packets():
             exchange(fd, recolour(packet, rgb))
             time.sleep(0.003)
