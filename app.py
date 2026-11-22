@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """PeaceMachine RGB Control — every LED in the box from one window.
 
-Backend is the locally-built OpenRGB binary (it carries the two patches this
-machine needs: the MSI X299 PRO board entry, and the K70 RGB PRO
-Optical-Mechanical keyboard entry). This app only ever shells out to it, so
-anything OpenRGB can do, this can do — and nothing here fights the hardware.
+Talks to a running `openrgb --server` through the SDK (see orbg.py) instead of
+shelling out: the CLI re-opens every device on each run, which wipes whatever was
+applied to the other channels, and that is what kept knocking colours out.
+
+The keyboard is written with the CLI's hardware "Static" mode rather than the
+server, because software/direct writes leave it dark when the app closes.
 """
 import json
 import os
 import re
-import shlex
 import subprocess
 import sys
 
@@ -17,11 +18,15 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, GLib, Gtk, Pango  # noqa: E402
+from gi.repository import Gdk, Gtk, Pango  # noqa: E402
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import orbg  # noqa: E402
 
 APP_ID = "org.jimmy.RgbControl"
 OPENRGB = "/usr/local/bin/openrgb"
-STATE = os.path.expanduser("~/.local/share/c0d3d/rgb-control/state.json")
+STATE = os.path.join(HERE, "state.json")
 
 PRESETS = [
     ("Matrix", "#00ff41"),
@@ -31,6 +36,10 @@ PRESETS = [
     ("White", "#ffffff"),
     ("Off", "#000000"),
 ]
+
+# zones that are addressable and need their length set before a frame is sent
+ADDRESSABLE = {"jrainbow1": 200, "jrainbow2": 240, "jcorsair": 240}
+ADDRESSABLE_LEN = 30          # what the fan hub actually answers to
 
 
 def rgb_to_hex(rgba):
@@ -47,6 +56,13 @@ def hex_to_rgba(value):
     return rgba
 
 
+def hex_to_tuple(value):
+    value = (value or "#00ff41").lstrip("#")
+    if len(value) != 6:
+        value = "00ff41"
+    return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
+
+
 class Device:
     def __init__(self, index, name):
         self.index = index
@@ -55,11 +71,13 @@ class Device:
         self.zones = []
         self.led_count = 0
         self.modes = []
+        self.keyboard = False
 
 
 def parse_devices():
     try:
-        out = subprocess.run([OPENRGB, "--list-detailed"], capture_output=True, text=True, timeout=25).stdout
+        out = subprocess.run([OPENRGB, "--list-detailed"], capture_output=True,
+                             text=True, timeout=25).stdout
     except Exception:
         return []
     devices, cur = [], None
@@ -74,6 +92,7 @@ def parse_devices():
         line = raw.strip()
         if line.startswith("Type:"):
             cur.type = line[5:].strip()
+            cur.keyboard = cur.type.lower() == "keyboard"
         elif line.startswith("Zones:"):
             cur.zones = [z.strip("'") for z in re.findall(r"'[^']*'|\S+", line[6:])]
         elif line.startswith("Modes:"):
@@ -83,99 +102,42 @@ def parse_devices():
     return devices
 
 
-def run_openrgb(args):
+def cli(args):
     try:
         r = subprocess.run([OPENRGB] + args, capture_output=True, text=True, timeout=25)
         return r.returncode == 0, (r.stdout + r.stderr).strip()
-    except Exception as exc:            # pragma: no cover - hardware dependent
+    except Exception as exc:
         return False, str(exc)
-
-
-class ZoneRow(Gtk.Box):
-    """One zone of one device: colour, brightness, mode, and its own apply."""
-
-    def __init__(self, window, device, zone_index, zone_name, modes):
-        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        self.window = window
-        self.device = device
-        self.index = zone_index
-        self.set_margin_top(2)
-        self.set_margin_bottom(2)
-
-        label = Gtk.Label(label=zone_name)
-        label.set_xalign(0)
-        label.set_hexpand(True)
-        label.add_css_class("zone-name")
-        self.append(label)
-
-        self.colour = Gtk.ColorDialogButton(dialog=Gtk.ColorDialog())
-        self.colour.set_rgba(hex_to_rgba(window.last_colour))
-        self.colour.set_valign(Gtk.Align.CENTER)
-        self.append(self.colour)
-
-        self.mode = Gtk.DropDown.new_from_strings(modes or ["static"])
-        for i, m in enumerate(modes or ["static"]):
-            if m.lower() == "static":
-                self.mode.set_selected(i)
-                break
-        self.mode.set_valign(Gtk.Align.CENTER)
-        self.append(self.mode)
-
-        self.bright = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
-        self.bright.set_value(window.last_brightness)
-        self.bright.set_size_request(120, -1)
-        self.bright.set_valign(Gtk.Align.CENTER)
-        self.bright.add_mark(100, Gtk.PositionType.RIGHT, None)
-        self.append(self.bright)
-
-        apply = Gtk.Button(label="Apply")
-        apply.add_css_class("apply")
-        apply.connect("clicked", lambda *_: self.apply())
-        self.append(apply)
-
-    def apply(self):
-        colour = rgb_to_hex(self.colour.get_rgba()).lstrip("#")
-        mode = self.mode.get_selected_item().get_string()
-        brightness = int(self.bright.get_value())
-        self.window.last_colour = "#" + colour
-        self.window.last_brightness = brightness
-        ok, msg = run_openrgb(["-d", str(self.device.index), "-z", str(self.index),
-                               "-m", mode, "-c", colour, "-b", str(brightness)])
-        self.window.set_status(
-            f"{self.device.name} · zone {self.index} → {mode} #{colour} at {brightness}%"
-            if ok else f"failed: {msg.splitlines()[-1] if msg else 'unknown error'}", ok)
-        return ok
 
 
 class Panel(Gtk.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title="PeaceMachine RGB Control")
-        self.set_default_size(980, 640)
+        self.set_default_size(940, 620)
         self.devices = []
         self.selected = None
-        self.last_colour = "#00ff41"
-        self.last_brightness = 70
+        self.client = None
+        self.colour_hex = "#00ff41"
+        self.brightness = 80
 
         header = Gtk.HeaderBar()
         header.set_show_title_buttons(False)
         title = Gtk.Label(label="PEACEMACHINE RGB")
         title.add_css_class("app-title")
         header.set_title_widget(title)
-
-        self.rescan_btn = Gtk.Button(label="Rescan")
-        self.rescan_btn.connect("clicked", lambda *_: self.scan())
-        header.pack_start(self.rescan_btn)
-
+        rescan = Gtk.Button(label="Rescan")
+        rescan.connect("clicked", lambda *_: self.scan())
+        header.pack_start(rescan)
         about = Gtk.Button(label="About")
         about.connect("clicked", lambda *_: self.show_about())
         header.pack_end(about)
         self.set_titlebar(header)
 
-        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        root.set_margin_top(10)
-        root.set_margin_bottom(10)
-        root.set_margin_start(12)
-        root.set_margin_end(12)
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        root.set_margin_top(12)
+        root.set_margin_bottom(12)
+        root.set_margin_start(14)
+        root.set_margin_end(14)
         self.set_child(root)
 
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
@@ -183,58 +145,74 @@ class Panel(Gtk.ApplicationWindow):
         root.append(paned)
 
         left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        left.set_size_request(280, -1)
-        caption = Gtk.Label(label="DEVICES")
-        caption.set_xalign(0)
-        caption.add_css_class("eyebrow")
-        left.append(caption)
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scroll.set_vexpand(True)
+        left.set_size_request(300, -1)
+        cap = Gtk.Label(label="DEVICES")
+        cap.set_xalign(0)
+        cap.add_css_class("eyebrow")
+        left.append(cap)
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_vexpand(True)
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.listbox = Gtk.ListBox()
         self.listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
-        self.listbox.connect("row-selected", self.on_row_selected)
-        scroll.set_child(self.listbox)
-        left.append(scroll)
+        self.listbox.connect("row-selected", self.on_select)
+        scroller.set_child(self.listbox)
+        left.append(scroller)
         paned.set_start_child(left)
 
-        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        right.set_margin_start(12)
+        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        right.set_margin_start(14)
 
-        self.device_title = Gtk.Label(label="Select a device")
-        self.device_title.set_xalign(0)
-        self.device_title.add_css_class("device-title")
-        right.append(self.device_title)
+        self.title_label = Gtk.Label(label="Select a device")
+        self.title_label.set_xalign(0)
+        self.title_label.add_css_class("device-title")
+        right.append(self.title_label)
 
-        self.device_meta = Gtk.Label(label="")
-        self.device_meta.set_xalign(0)
-        self.device_meta.add_css_class("device-meta")
-        right.append(self.device_meta)
+        self.meta_label = Gtk.Label(label="")
+        self.meta_label.set_xalign(0)
+        self.meta_label.add_css_class("device-meta")
+        right.append(self.meta_label)
 
-        zone_caption = Gtk.Label(label="CHANNELS")
-        zone_caption.set_xalign(0)
-        zone_caption.add_css_class("eyebrow")
-        right.append(zone_caption)
+        colour_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        lbl = Gtk.Label(label="COLOUR")
+        lbl.add_css_class("eyebrow")
+        colour_row.append(lbl)
+        self.colour_button = Gtk.ColorDialogButton(dialog=Gtk.ColorDialog())
+        self.colour_button.set_rgba(hex_to_rgba(self.colour_hex))
+        colour_row.append(self.colour_button)
+        right.append(colour_row)
 
-        self.zone_scroll = Gtk.ScrolledWindow()
-        self.zone_scroll.set_vexpand(True)
-        self.zone_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        self.zone_scroll.set_child(self.zone_box)
-        right.append(self.zone_scroll)
+        bright_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        blbl = Gtk.Label(label="BRIGHTNESS")
+        blbl.add_css_class("eyebrow")
+        bright_row.append(blbl)
+        self.bright = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
+        self.bright.set_value(self.brightness)
+        self.bright.set_hexpand(True)
+        self.bright.set_draw_value(True)
+        bright_row.append(self.bright)
+        right.append(bright_row)
 
-        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        apply_all = Gtk.Button(label="Apply to every channel")
-        apply_all.add_css_class("apply")
-        apply_all.connect("clicked", lambda *_: self.apply_all())
-        actions.append(apply_all)
-        right.append(actions)
+        apply = Gtk.Button(label="Apply to this device")
+        apply.add_css_class("apply")
+        apply.connect("clicked", lambda *_: self.apply_selected())
+        right.append(apply)
 
+        self.zones_label = Gtk.Label(label="")
+        self.zones_label.set_xalign(0)
+        self.zones_label.add_css_class("device-meta")
+        self.zones_label.set_wrap(True)
+        right.append(self.zones_label)
+
+        spacer = Gtk.Box()
+        spacer.set_vexpand(True)
+        right.append(spacer)
         paned.set_end_child(right)
 
         presets = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        cap = Gtk.Label(label="EVERYTHING")
-        cap.add_css_class("eyebrow")
-        presets.append(cap)
+        pcap = Gtk.Label(label="EVERYTHING")
+        pcap.add_css_class("eyebrow")
+        presets.append(pcap)
         for name, colour in PRESETS:
             b = Gtk.Button(label=name)
             b.add_css_class("preset")
@@ -242,14 +220,28 @@ class Panel(Gtk.ApplicationWindow):
             presets.append(b)
         root.append(presets)
 
-        self.status = Gtk.Label(label="Scanning…")
+        self.status = Gtk.Label(label="Starting…")
         self.status.set_xalign(0)
         self.status.add_css_class("status")
         root.append(self.status)
 
         self.scan()
 
-    # ---------------------------------------------------------------- devices
+    # ------------------------------------------------------------------ state
+    def connect(self):
+        if self.client is not None:
+            return self.client
+        if not orbg.ensure_server():
+            self.set_status("OpenRGB server is not answering on port 6742", False)
+            return None
+        try:
+            self.client = orbg.Client()
+            self.client.set_client_name("PeaceMachine RGB Control")
+        except Exception as exc:
+            self.client = None
+            self.set_status(f"could not connect: {exc}", False)
+        return self.client
+
     def scan(self):
         while (child := self.listbox.get_first_child()):
             self.listbox.remove(child)
@@ -261,57 +253,71 @@ class Panel(Gtk.ApplicationWindow):
             box.set_margin_bottom(6)
             name = Gtk.Label(label=dev.name)
             name.set_xalign(0)
-            name.add_css_class("device-name")
             name.set_ellipsize(Pango.EllipsizeMode.END)
-            meta = Gtk.Label(label=f"{dev.type or 'device'} · {len(dev.zones)} channel(s)")
-            meta.set_xalign(0)
-            meta.add_css_class("device-sub")
+            name.add_css_class("device-name")
+            sub = Gtk.Label(label=f"{dev.type or 'device'} · {dev.led_count} LED(s)")
+            sub.set_xalign(0)
+            sub.add_css_class("device-sub")
             box.append(name)
-            box.append(meta)
+            box.append(sub)
             row.set_child(box)
             row.device = dev
             self.listbox.append(row)
-        self.set_status(f"{len(self.devices)} device(s) found", True)
+        self.set_status(f"{len(self.devices)} device(s) found")
         first = self.listbox.get_first_child()
         if first:
             self.listbox.select_row(first)
 
-    def on_row_selected(self, _lb, row):
+    def on_select(self, _lb, row):
         if row is None:
             return
-        self.selected = row.device
-        dev = self.selected
-        self.device_title.set_text(dev.name)
-        self.device_meta.set_text(f"{dev.type} · {len(dev.zones)} channel(s) · {dev.led_count} LED(s)")
-        while (child := self.zone_box.get_first_child()):
-            self.zone_box.remove(child)
-        modes = dev.modes or ["static"]
-        for i, zone in enumerate(dev.zones):
-            self.zone_box.append(ZoneRow(self, dev, i, zone, modes))
-        if not dev.zones:
-            empty = Gtk.Label(label="This device does not report any channels.")
-            empty.add_css_class("device-meta")
-            self.zone_box.append(empty)
+        dev = row.device
+        self.selected = dev
+        self.title_label.set_text(dev.name)
+        self.meta_label.set_text(f"{dev.type} · {len(dev.zones)} channel(s) · {dev.led_count} LED(s)")
+        self.zones_label.set_text("Channels: " + (", ".join(dev.zones) if dev.zones else "none"))
 
-    def apply_all(self):
-        if not self.selected:
-            return
-        for child in self._zone_rows():
-            child.apply()
+    # ------------------------------------------------------------------ apply
+    def apply_selected(self):
+        if self.selected:
+            self.apply_device(self.selected)
 
-    def _zone_rows(self):
-        rows, child = [], self.zone_box.get_first_child()
-        while child:
-            if isinstance(child, ZoneRow):
-                rows.append(child)
-            child = child.get_next_sibling()
-        return rows
+    def apply_device(self, dev):
+        colour = rgb_to_hex(self.colour_button.get_rgba())
+        self.colour_hex = colour
+        self.brightness = int(self.bright.get_value())
+
+        if dev.keyboard:
+            ok, msg = cli(["-d", dev.name, "-m", "Static", "-c", colour.lstrip("#"),
+                           "-b", str(self.brightness)])
+            self.set_status(f"{dev.name}: hardware Static {colour}" if ok else
+                            f"{dev.name}: {msg.splitlines()[-1] if msg else 'failed'}", ok)
+            return ok
+
+        client = self.connect()
+        if client is None:
+            return False
+        try:
+            for zi, zone in enumerate(dev.zones):
+                key = zone.lower().replace(" ", "")
+                if key in ADDRESSABLE:
+                    client.resize_zone(dev.index, zi, ADDRESSABLE_LEN)
+            client.custom_mode(dev.index)
+            if dev.led_count:
+                client.update_leds(dev.index, [hex_to_tuple(colour)] * dev.led_count)
+            client.drain(0.1)
+            self.set_status(f"{dev.name}: {colour} over {dev.led_count} LED(s)")
+            return True
+        except Exception as exc:
+            self.set_status(f"{dev.name}: {exc}", False)
+            return False
 
     def apply_everything(self, colour):
-        hexcol = colour.lstrip("#")
+        rgba = hex_to_rgba(colour)
+        self.colour_button.set_rgba(rgba)
         for dev in self.devices:
-            run_openrgb(["-d", str(dev.index), "-m", "static", "-c", hexcol, "-b", str(self.last_brightness)])
-        self.set_status(f"Every device set to {colour} at {self.last_brightness}%", True)
+            self.apply_device(dev)
+        self.set_status(f"Every device set to {colour} at {self.brightness}%")
 
     # ----------------------------------------------------------------- chrome
     def set_status(self, text, ok=True):
@@ -324,8 +330,8 @@ class Panel(Gtk.ApplicationWindow):
         dlg = Gtk.AboutDialog(transient_for=self, modal=True)
         dlg.set_program_name("PeaceMachine RGB Control")
         dlg.set_version("1.0.0")
-        dlg.set_comments("Every LED in the box from one window — board, fans, "
-                         "keyboard, GPU and mouse.")
+        dlg.set_comments("Board, fans, GPU and mouse from one window, over a live "
+                         "OpenRGB connection. Keyboard takes a hardware Static.")
         dlg.set_website("https://peacemachinestudios.com")
         dlg.set_copyright("© 2026 William James Sova (C0D3D) — PeaceMachineStudios")
         dlg.set_logo_icon_name("preferences-color")
@@ -344,7 +350,7 @@ class RgbApp(Gtk.Application):
 
 def main():
     provider = Gtk.CssProvider()
-    css = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rgb.css")
+    css = os.path.join(HERE, "rgb.css")
     if os.path.exists(css):
         provider.load_from_path(css)
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), provider,
