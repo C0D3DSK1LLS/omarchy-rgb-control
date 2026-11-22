@@ -1,4 +1,4 @@
 __pycache__/
 *.pyc
-openrgb-config/logs/
-openrgb-config/Configuration.json
+openrgb-config/
+state.json

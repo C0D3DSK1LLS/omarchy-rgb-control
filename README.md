@@ -1,75 +1,76 @@
-# PeaceMachine RGB Control
+# Omarchy RGB Control
 
-Board/GPU/mouse use OpenRGB. The K70 RGB PRO Optical-Mechanical (1b1c:1bc6)
-uses a native lighting-only sender, `kb-colour.py`. Its colour picker and the
-Matrix/Crimson/Ice/Amber/White/Off buttons use the same path.
+One GTK4 panel for every light in the box on **Omarchy / Arch Linux**:
+motherboard and ARGB fans, GPU and mouse through OpenRGB, G.Skill Trident Z
+Royal RAM and a Corsair K70 RGB PRO Optical keyboard driven natively.
 
-## K70 correction and incident
+Built on C0D3D's machine and published as-is for other Omarchy users who want
+the same thing. It is not a universal RGB app; hardware support is exactly what
+OpenRGB (or the native paths below) can reach.
 
-The first capture replay was wrong: it included key assignments (resource02,
-129-byte payload) and performance settings (register4a). C0D3D reported repeated
-letters; reconnecting restored normal input. Those writes are now forbidden by
-`validate_packet()` at the actual USB transport boundary, as are indicator,
-macro and flash writes. No input mappings or keyboard performance flags are set.
+## What it does
 
-Only these operations are allowed: read mode; set hardware/software mode;
-open/close handle0 for lighting resource22; RGB type12; keepalive12.
-The successful capture supplies only the RGB frame, never a startup script.
-Repeated-open status3 is handled with close/reopen, matching ckb-next.
+- **RAM** — G.Skill Trident Z Royal (ENE controllers) over SMBus: solid colours,
+  the 15 effects from G.Skill's own software with five speeds, and 32 extra
+  effects with their own colour palettes.
+- **Keyboard** — Corsair K70 RGB PRO Optical (1b1c:1bc6): per-key painting,
+  key naming, eight keyboard effects, native HID (no iCUE, no Wine).
+- **Board / fans** — the full MSI Mystic Light effect list plus colour.
+- **GPU / mouse** — whatever OpenRGB exposes.
+- **Persistence** — a small user service owns the lighting, so effects keep
+  running with the panel closed and return at login.
 
-Wire report is 1024 bytes; Linux hidraw write receives an extra leading zero.
-Payload is 428 bytes: type12 (two bytes) + 142 RGB triplets. Unused black slots
-and white indicator slots are preserved. OpenRGB's 111 named LEDs are unrelated
-to the protocol's 142 slots. Brightness scales key RGB values.
+## Requirements
 
-Sources checked against the capture:
-- https://github.com/jurkovic-nikola/OpenLinkHub/blob/main/src/devices/k70pro/k70pro.go
-- https://github.com/ckb-next/ckb-next/blob/master/src/daemon/device_bragi.c
-- https://github.com/ckb-next/ckb-next/blob/master/src/daemon/bragi_common.c
-- https://www.kernel.org/doc/html/latest/hid/hidraw.html
+- Omarchy or Arch with GTK4 / PyGObject: `sudo pacman -S python-gobject gtk4 i2c-tools`
+- OpenRGB: `sudo pacman -S openrgb` (or a local build, see below)
+- Optional, RAM only: the `i2c-imc-skylake` driver over DKMS, with
+  `allow_unsafe_access=1`. The RAM paths need it; everything else works without.
+- Optional, keyboard only: nothing — it speaks HID directly.
 
-## Panel behaviour
+## Hardware notes
 
-Hardware jobs run on one background worker; GTK receives progress and results
-through GLib. Repeated clicks cannot start competing writes. All normal-device
-zones are batched into one OpenRGB command; the device's supported Static or
-Direct mode is chosen. Errors do not get overwritten by a success message.
+- **MSI X299 PRO (MS-7B94)** needs an OpenRGB build that knows the board's
+  185-byte protocol. Upstream OpenRGB may already include it; if your board is
+  missing, add its ID to the MSI 185 controller table and build with
+  `ENABLE_UNTESTED_MYSTIC_LIGHT`.
+- **Corsair K70 RGB PRO Optical (1b1c:1bc6)** is driven by this project, not by
+  OpenRGB. The sender is capture-backed and lighting-only.
+- **G.Skill RAM** talks ENE SMBus; after a cold boot the modules may all park on
+  address 0x77, so the code remaps their slots before scanning.
+- Other Corsair keyboards/RAM are not supported by the native paths — use
+  OpenRGB for those.
 
-The isolated `openrgb-config` preserves existing settings and disables only the
-K70 detector. `--noautoconnect` prevents using another server's detector settings.
-OpenRGB therefore cannot reset the keyboard during panel scans/updates.
-
-While the panel is open and controls the keyboard, it pings every 20 seconds.
-Closing waits for the current write and restores hardware mode. A failed colour
-write also attempts hardware restoration. No separate daemon is installed.
-Keep the panel open to retain software lighting; no permanent boot profile is
-saved. Other independently-running RGB software must not control the same device.
-
-## Checks and current verification limit
+## Run
 
 ```bash
-python3 test_rgb_control.py
+git clone https://github.com/C0D3DSK1LLS/omarchy-rgb-control
+cd omarchy-rgb-control
+./c0d3d-rgb-control     # or: python3 app.py
 ```
 
-```bash
-python3 test_k70_protocol.py
-```
+Desktop entry and launcher used on the original machine:
 
-```bash
-python3 kb-colour.py --self-test
-```
+- `~/.local/bin/c0d3d-rgb-control`
+- `~/.local/share/applications/org.jimmy.RgbControl.desktop`
 
-Checks use simulated hardware, never real USB writes. They cover main-loop
-responsiveness during slow operations, batching, mode selection, failures,
-colour changes, repeated handle opens, input-write blocking and restoration.
-The sandbox exposes sysfs but no USB device nodes and prohibits X11/D-Bus socket
-binding. Physical operation of this corrected lighting-only version still needs
-C0D3D's check; earlier full-replay colour success did not prove input safety.
+## Safety
 
-Recovery if ever needed:
+- Keyboard writes are restricted to lighting commands by a transport-level
+  whitelist; key assignments, macros and firmware writes are refused.
+- All writes require `RGB_KB_WRITES=1`, set by the panel/service.
+- The RAM driver touches the memory controller's SMBus. Read `RUNBOOK.md`
+  before enabling it, and unload it when not in use if you prefer.
 
-```bash
-python3 ~/.local/share/c0d3d/rgb-control/kb-colour.py --restore
-```
+## Files and state
 
-Reconnecting the keyboard also returns it to its hardware profile.
+- RAM state: `~/.local/state/ralph/rgb-ram-state.json`
+- Keyboard state: `~/.local/state/ralph/rgb-keyboard-state.json`
+- Presets: `~/.config/c0d3d/rgb-colour-presets.json`
+- Key names: `~/.config/c0d3d/rgb-key-labels.json`
+- Logs: `~/.local/state/ralph/diagnostics/`
+- Runbook: [RUNBOOK.md](RUNBOOK.md)
+
+## Licence
+
+MIT — © 2026 William James Sova (C0D3D), PeaceMachineStudios.
