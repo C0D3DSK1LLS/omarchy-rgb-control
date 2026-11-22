@@ -103,8 +103,7 @@ button.preset {
   border-color: #17301f;
 }
 
-/* Keyboard keys: clickable, and visibly held while selected. */
-button.kb-key {
+/* Keyboard keys: clickable, and visibly held while selected. */button.kb-key {
   padding: 2px 6px;
   min-width: 0;
   min-height: 0;
@@ -189,4 +188,19 @@ colordialogbutton button {
 
 aboutdialog {
   background-color: #040404;
+}
+
+/* Colour presets: true colours, no pastel wheel. */
+button.swatch {
+  padding: 0;
+  min-width: 0;
+  min-height: 0;
+  border-radius: 6px;
+  border: 1px solid #1d3b25;
+  background: none;
+}
+
+button.swatch:hover {
+  border-color: #00ff41;
+  box-shadow: 0 0 8px rgba(0, 255, 65, 0.25);
 }

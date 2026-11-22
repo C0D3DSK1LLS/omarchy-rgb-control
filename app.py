@@ -72,6 +72,149 @@ def rgba_to_tuple(rgba):
             int(rgba.blue * 255 + 0.5))
 
 
+PRESET_FILE = os.path.expanduser("~/.config/c0d3d/rgb-colour-presets.json")
+DEFAULT_PRESETS = ["#ff0000", "#00ff00", "#0000ff", "#ffff00", "#ff00ff", "#00ffff",
+                   "#ffffff", "#000000", "#00ff41", "#dc143c", "#8fd6ff", "#ffa500",
+                   "#8a2be2", "#ffd700"]
+
+
+def load_presets():
+    try:
+        with open(PRESET_FILE) as handle:
+            data = json.load(handle)
+        if isinstance(data, list) and data:
+            return [str(item) for item in data if str(item).startswith("#")]
+    except (OSError, ValueError):
+        pass
+    return list(DEFAULT_PRESETS)
+
+
+def save_presets(presets):
+    try:
+        os.makedirs(os.path.dirname(PRESET_FILE), exist_ok=True)
+        temp = PRESET_FILE + ".tmp"
+        with open(temp, "w") as handle:
+            json.dump(presets, handle)
+        os.replace(temp, PRESET_FILE)
+    except OSError:
+        pass
+
+
+class ColourButton(Gtk.MenuButton):
+    """A swatch that opens our own preset grid, not GTK's pastel wheel."""
+
+    def __init__(self, initial="#00ff41"):
+        super().__init__()
+        self.rgba = hex_to_rgba(initial)
+        self.presets = load_presets()
+        self.swatch = Gtk.DrawingArea()
+        self.swatch.set_content_width(34)
+        self.swatch.set_content_height(20)
+        self.swatch.set_draw_func(self.draw_swatch)
+        self.set_child(self.swatch)
+        self.set_tooltip_text("Colour presets")
+        self.set_popover(self.build_popover())
+
+    def draw_swatch(self, _area, cr, width, height):
+        cr.set_source_rgb(self.rgba.red, self.rgba.green, self.rgba.blue)
+        cr.rectangle(0.5, 0.5, width - 1, height - 1)
+        cr.fill()
+        cr.set_source_rgba(1, 1, 1, 0.25)
+        cr.set_line_width(1)
+        cr.rectangle(0.5, 0.5, width - 1, height - 1)
+        cr.stroke()
+
+    def build_popover(self):
+        popover = Gtk.Popover()
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_margin_top(10)
+        box.set_margin_bottom(10)
+        box.set_margin_start(10)
+        box.set_margin_end(10)
+        grid = Gtk.FlowBox()
+        grid.set_max_children_per_line(7)
+        grid.set_selection_mode(Gtk.SelectionMode.NONE)
+        grid.set_column_spacing(6)
+        grid.set_row_spacing(6)
+        for colour in self.presets:
+            grid.append(self.make_swatch(colour))
+        box.append(grid)
+
+        entry_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.hex_entry = Gtk.Entry()
+        self.hex_entry.set_width_chars(9)
+        self.hex_entry.set_placeholder_text("#rrggbb")
+        entry_row.append(self.hex_entry)
+        use = Gtk.Button(label="Use")
+        use.connect("clicked", lambda *_: self.apply_hex())
+        entry_row.append(use)
+        save = Gtk.Button(label="Save preset")
+        save.connect("clicked", lambda *_: self.save_current())
+        entry_row.append(save)
+        box.append(entry_row)
+        self.preset_grid = grid
+        popover.set_child(box)
+        return popover
+
+    def make_swatch(self, colour):
+        area = Gtk.DrawingArea()
+        area.set_content_width(24)
+        area.set_content_height(24)
+        area.set_tooltip_text(colour)
+        rgba = hex_to_rgba(colour)
+        def draw(_area, cr, width, height, rgba=rgba):
+            cr.set_source_rgb(rgba.red, rgba.green, rgba.blue)
+            cr.rectangle(0.5, 0.5, width - 1, height - 1)
+            cr.fill()
+            cr.set_source_rgba(1, 1, 1, 0.22)
+            cr.set_line_width(1)
+            cr.rectangle(0.5, 0.5, width - 1, height - 1)
+            cr.stroke()
+        area.set_draw_func(draw)
+        button = Gtk.Button()
+        button.add_css_class("swatch")
+        button.set_child(area)
+        button.connect("clicked", lambda *_: self.set_colour(colour))
+        return button
+
+    def apply_hex(self):
+        value = (self.hex_entry.get_text() or "").strip()
+        if value and not value.startswith("#"):
+            value = "#" + value
+        if len(value) != 7:
+            return
+        try:
+            int(value[1:], 16)
+        except ValueError:
+            return
+        self.set_colour(value.lower())
+
+    def set_colour(self, colour):
+        self.set_rgba(hex_to_rgba(colour))
+        self.get_popover().popdown()
+
+    def save_current(self):
+        colour = "#%02x%02x%02x" % (int(self.rgba.red * 255 + 0.5),
+                                    int(self.rgba.green * 255 + 0.5),
+                                    int(self.rgba.blue * 255 + 0.5))
+        if colour not in self.presets:
+            self.presets.append(colour)
+            save_presets(self.presets)
+            self.preset_grid.append(self.make_swatch(colour))
+            self.preset_grid.show()
+
+    def set_rgba(self, rgba):
+        self.rgba = rgba
+        self.swatch.queue_draw()
+        if hasattr(self, "hex_entry"):
+            self.hex_entry.set_text("#%02x%02x%02x" % (int(rgba.red * 255 + 0.5),
+                                                       int(rgba.green * 255 + 0.5),
+                                                       int(rgba.blue * 255 + 0.5)))
+
+    def get_rgba(self):
+        return self.rgba
+
+
 class Device:
     def __init__(self, index, name):
         self.index = index
@@ -326,7 +469,7 @@ class Panel(Gtk.ApplicationWindow):
         lbl = Gtk.Label(label="COLOUR")
         lbl.add_css_class("eyebrow")
         colour_row.append(lbl)
-        self.colour_button = Gtk.ColorDialogButton(dialog=Gtk.ColorDialog())
+        self.colour_button = ColourButton(self.colour_hex)
         self.colour_button.set_rgba(hex_to_rgba(self.colour_hex))
         colour_row.append(self.colour_button)
         right.append(colour_row)
@@ -430,7 +573,7 @@ class Panel(Gtk.ApplicationWindow):
         keys_colour_label = Gtk.Label(label="KEYS COLOUR")
         keys_colour_label.add_css_class("eyebrow")
         kb_buttons.append(keys_colour_label)
-        self.keys_colour_button = Gtk.ColorDialogButton(dialog=Gtk.ColorDialog())
+        self.keys_colour_button = ColourButton("#00ff41")
         self.keys_colour_button.set_rgba(hex_to_rgba("#00ff41"))
         kb_buttons.append(self.keys_colour_button)
         paint = Gtk.Button(label="Paint selected")
@@ -827,7 +970,7 @@ class Panel(Gtk.ApplicationWindow):
             caption.add_css_class("eyebrow")
             caption.set_xalign(0)
             cell.append(caption)
-            button = Gtk.ColorDialogButton(dialog=Gtk.ColorDialog())
+            button = ColourButton("#%02x%02x%02x" % tuple(default))
             button.set_rgba(hex_to_rgba("#%02x%02x%02x" % tuple(default)))
             cell.append(button)
             self.palette_row.append(cell)
@@ -876,7 +1019,7 @@ class Panel(Gtk.ApplicationWindow):
             caption.add_css_class("eyebrow")
             caption.set_xalign(0)
             cell.append(caption)
-            button = Gtk.ColorDialogButton(dialog=Gtk.ColorDialog())
+            button = ColourButton("#%02x%02x%02x" % tuple(default))
             button.set_rgba(hex_to_rgba("#%02x%02x%02x" % tuple(default)))
             cell.append(button)
             self.kb_palette_row.append(cell)
