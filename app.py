@@ -36,7 +36,7 @@ STATE = os.path.join(HERE, "state.json")
 RAM_STATE = os.path.expanduser("~/.local/state/ralph/rgb-ram-state.json")
 KB_STATE = os.path.expanduser("~/.local/state/ralph/rgb-keyboard-state.json")
 PANEL_STATE = os.path.expanduser("~/.local/state/ralph/rgb-panel-layout.json")
-DEFAULT_SIDEBAR = 300
+DEFAULT_SIDEBAR = 396
 
 # per-zone LED counts for the MSI board. The CLI's total is unreliable because
 # it re-reads its own saved zone sizes, so each zone is written by its own count.
