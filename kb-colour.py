@@ -58,13 +58,15 @@ def recolour_slots(packet, colours):
         raise ValueError('Unexpected RGB payload type')
     result = bytearray(packet)
     old = bytes.fromhex('1b33ff')
-    slot = 0
-    for offset in range(9, 435, 3):
-        if packet[offset:offset + 3] == old:
-            colour = colours[slot] if slot < len(colours) else (0, 0, 0)
-            result[offset:offset + 3] = bytes(colour)
-            slot += 1
-    return bytes(result), slot
+    painted = 0
+    for slot in range(142):
+        offset = 9 + slot * 3
+        if packet[offset:offset + 3] != old:
+            continue
+        colour = colours[slot] if slot < len(colours) else (0, 0, 0)
+        result[offset:offset + 3] = bytes(colour)
+        painted += 1
+    return bytes(result), painted
 
 
 def control_path():
