@@ -586,10 +586,6 @@ class Panel(Gtk.ApplicationWindow):
         deselect = Gtk.Button(label="Clear selection")
         deselect.connect("clicked", lambda *_: self.clear_key_selection())
         kb_buttons.append(deselect)
-        self.show_unnamed = Gtk.CheckButton(label="Show unnamed")
-        self.show_unnamed.set_active(False)
-        self.show_unnamed.connect("toggled", lambda *_: self.apply_unnamed_visibility())
-        kb_buttons.append(self.show_unnamed)
         fill = Gtk.Button(label="Fill all keys")
         fill.connect("clicked", lambda *_: self.fill_all_keys())
         kb_buttons.append(fill)
@@ -611,9 +607,6 @@ class Panel(Gtk.ApplicationWindow):
         save_name = Gtk.Button(label="Save name")
         save_name.connect("clicked", lambda *_: self.save_selected_key_name())
         name_row.append(save_name)
-        next_key = Gtk.Button(label="Next unnamed")
-        next_key.connect("clicked", lambda *_: self.next_unnamed_key())
-        name_row.append(next_key)
         self.kb_keys_row.append(name_row)
 
         kb_scroller = Gtk.ScrolledWindow()
@@ -628,6 +621,8 @@ class Panel(Gtk.ApplicationWindow):
         saved = kb_keys.load_labels()
         for slot, label in kb_keys.KEYS:
             label = saved.get(slot, label)
+            if str(label).startswith("Special "):
+                continue          # only named, real keys are shown
             button = Gtk.Button(label=label)
             button.add_css_class("kb-key")
             button.set_tooltip_text(f"{label} · slot {slot}")
@@ -638,7 +633,6 @@ class Panel(Gtk.ApplicationWindow):
         self.kb_keys_row.append(kb_scroller)
         self.kb_keys_row.set_visible(False)
         right.append(self.kb_keys_row)
-        self.apply_unnamed_visibility()
         self.key_colours = {}
         self.kb_selected = set()
         self.kb_anim_pid = None
@@ -1172,12 +1166,6 @@ class Panel(Gtk.ApplicationWindow):
         for slot, button in self.kb_key_buttons.items():
             self.kb_selected.add(slot)
             button.add_css_class("kb-selected")
-
-    def apply_unnamed_visibility(self):
-        show = self.show_unnamed.get_active()
-        for slot, button in self.kb_key_buttons.items():
-            if str(button.get_label()).startswith("Special "):
-                button.set_visible(show)
 
     def light_selected_key(self):
         if len(self.kb_selected) != 1:
