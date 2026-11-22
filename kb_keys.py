@@ -22,23 +22,21 @@ MAIN = (
        "Num 0", "Num .", "Non-US \\"]
 )
 
-CONFIRMED = {
-    97: "Left Ctrl",
-    98: "Left Shift",
-    101: "Right Ctrl",
-    102: "Right Shift",
-}
+# No modifier guesses: the slots once believed to be Ctrl/Shift turned out to
+# be numpad and media keys. Everything in the tail is named in the panel.
+CONFIRMED = {}
 
 SPECIAL_SLOTS = [97, 98, 99, 101, 102, 105, 106, 107, 108, 109, 110, 111,
                  122, 123, 124, 125, 126, 128, 137, 138, 140, 141]
 
-KEYS = [(slot, MAIN[slot]) for slot in range(len(MAIN))]
+KEYS = [(index + 4, MAIN[index]) for index in range(len(MAIN))]
 KEYS += [(slot, CONFIRMED.get(slot, f"Special {index + 1}"))
          for index, slot in enumerate(SPECIAL_SLOTS) if slot not in CONFIRMED]
 KEYS += [(slot, name) for slot, name in CONFIRMED.items()]
 KEYS.sort(key=lambda item: item[0])
 
 LABELS = dict(KEYS)
+SLOT_OFFSET = 4
 
 
 LABEL_FILE = "/home/jimmy/.config/c0d3d/rgb-key-labels.json"
