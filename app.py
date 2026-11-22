@@ -35,6 +35,8 @@ K70_NAME = "Corsair K70 RGB PRO Optical-Mechanical"
 STATE = os.path.join(HERE, "state.json")
 RAM_STATE = os.path.expanduser("~/.local/state/ralph/rgb-ram-state.json")
 KB_STATE = os.path.expanduser("~/.local/state/ralph/rgb-keyboard-state.json")
+PANEL_STATE = os.path.expanduser("~/.local/state/ralph/rgb-panel-layout.json")
+DEFAULT_SIDEBAR = 300
 
 # per-zone LED counts for the MSI board. The CLI's total is unreliable because
 # it re-reads its own saved zone sizes, so each zone is written by its own count.
@@ -433,6 +435,9 @@ class Panel(Gtk.ApplicationWindow):
         self.set_child(root)
 
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        self.paned = paned
+        self.sidebar_width = self.load_sidebar_width()
+        self.sidebar_ready = False
         paned.set_vexpand(True)
         root.append(paned)
 
@@ -677,8 +682,58 @@ class Panel(Gtk.ApplicationWindow):
         activity.set_hexpand(True)
         root.append(activity)
 
+        paned.connect("notify::position", self.on_paned_moved)
+        GLib.timeout_add(180, self.apply_sidebar_width)
         self.keepalive_source = GLib.timeout_add_seconds(20, self.keep_keyboard_alive)
         GLib.idle_add(self.scan)
+
+    # -------------------------------------------------------------- sidebar
+    def load_sidebar_width(self):
+        try:
+            with open(PANEL_STATE) as handle:
+                value = int(json.load(handle).get("sidebar", DEFAULT_SIDEBAR))
+            return max(180, min(900, value))
+        except (OSError, ValueError, TypeError):
+            return DEFAULT_SIDEBAR
+
+    def apply_sidebar_width(self):
+        """Restore the divider once the paned actually has a width."""
+        width = self.paned.get_width()
+        if width > 0:
+            target = min(self.sidebar_width, max(180, width - 320))
+            self.applying_sidebar = True
+            self.paned.set_position(target)
+            GLib.timeout_add(120, self.clear_sidebar_guard)
+            return False
+        return True
+
+    def clear_sidebar_guard(self):
+        self.applying_sidebar = False
+        self.sidebar_ready = True
+        return False
+
+    def on_paned_moved(self, paned, _param):
+        if getattr(self, "applying_sidebar", False) or not getattr(self, "sidebar_ready", False):
+            return
+        position = paned.get_position()
+        if position < 120:
+            return
+        self.sidebar_width = position
+        if getattr(self, "sidebar_timer", None) is not None:
+            GLib.source_remove(self.sidebar_timer)
+        self.sidebar_timer = GLib.timeout_add(500, self.save_sidebar_width)
+
+    def save_sidebar_width(self):
+        self.sidebar_timer = None
+        try:
+            os.makedirs(os.path.dirname(PANEL_STATE), exist_ok=True)
+            temp = PANEL_STATE + ".tmp"
+            with open(temp, "w") as handle:
+                json.dump({"sidebar": int(self.sidebar_width)}, handle)
+            os.replace(temp, PANEL_STATE)
+        except OSError:
+            pass
+        return False
 
     # ------------------------------------------------------------------ state
     def release_keyboard(self):
