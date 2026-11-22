@@ -122,6 +122,8 @@ def main():
     if args.self_test:
         self_test()
         return 0
+    if not args.restore:
+        raise RuntimeError('Keyboard colour control disabled after input malfunction; use --restore for hardware mode')
     colour = args.colour.lstrip('#')
     if len(colour) != 6:
         parser.error('colour must contain six hexadecimal digits')

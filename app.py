@@ -139,6 +139,10 @@ def is_k70_optical(dev):
 
 
 def keyboard_colour(colour, brightness=100):
+    return False, "Keyboard lighting paused after input malfunction; reconnect the keyboard to restore normal typing"
+
+
+def _disabled_keyboard_colour(colour, brightness=100):
     try:
         result = subprocess.run(
             [sys.executable, os.path.join(HERE, "kb-colour.py"), colour.lstrip("#"), "--brightness", str(brightness)],
