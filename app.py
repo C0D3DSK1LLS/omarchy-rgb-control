@@ -31,6 +31,7 @@ OPENRGB = "/usr/local/bin/openrgb"
 OPENRGB_CONFIG = os.path.join(HERE, "openrgb-config")
 K70_NAME = "Corsair K70 RGB PRO Optical-Mechanical"
 STATE = os.path.join(HERE, "state.json")
+RAM_STATE = os.path.expanduser("~/.local/state/ralph/rgb-ram-state.json")
 
 # per-zone LED counts for the MSI board. The CLI's total is unreliable because
 # it re-reads its own saved zone sizes, so each zone is written by its own count.
@@ -448,7 +449,6 @@ class Panel(Gtk.ApplicationWindow):
     def on_close(self, *_args):
         self.closed = True
         self.cancelled.set()
-        self.stop_animation()
         if self.keepalive_source is not None:
             GLib.source_remove(self.keepalive_source)
             self.keepalive_source = None
@@ -632,22 +632,47 @@ class Panel(Gtk.ApplicationWindow):
             sticks = dev.ram_sticks
             if self.ram_choice > 0:
                 sticks = [sticks[self.ram_choice - 1]]
+            brightness = int(self.bright.get_value())
             custom = self.mine_dropdown.get_selected()
             if custom > 0:
                 name = effects.EFFECT_NAMES[custom - 1]
-                self.start_animation(name, sticks, int(self.bright.get_value()),
-                                     self.palette_colours())
+                payload = {
+                    "kind": "custom",
+                    "effect": name,
+                    "colours": [list(colour) for colour in self.palette_colours()],
+                    "brightness": brightness,
+                    "sticks": [[stick.bus, stick.address] for stick in sticks],
+                }
+                self.write_lighting(payload, f"{name} running on {len(sticks)} stick(s) "
+                                             f"at {brightness}%")
+                self.animating = True
+                self.stop_button.set_visible(True)
                 return
-            self.stop_animation()
-            target = Device(None, sticks[0].label if len(sticks) == 1 else "RAM")
-            target.type = "DRAM"
-            target.ram_sticks = sticks
-            target.ram_mode = ram.MODES[self.effect_dropdown.get_selected()][1]
-            target.ram_speed = ram.SPEEDS[self.speed_dropdown.get_selected()][1]
-            self.start_apply([target], rgb_to_hex(self.colour_button.get_rgba()))
+            payload = {
+                "kind": "hardware",
+                "mode": ram.MODES[self.effect_dropdown.get_selected()][1],
+                "speed": ram.SPEEDS[self.speed_dropdown.get_selected()][1],
+                "colour": rgb_to_hex(self.colour_button.get_rgba()),
+                "brightness": brightness,
+                "sticks": [[stick.bus, stick.address] for stick in sticks],
+            }
+            self.write_lighting(payload, f"Applied to {len(sticks)} stick(s)")
+            self.animating = False
+            self.stop_button.set_visible(False)
             return
-        self.stop_animation()
         self.start_apply([dev], rgb_to_hex(self.colour_button.get_rgba()))
+
+    def write_lighting(self, payload, message):
+        """Hand the RAM job to the lighting service; the panel never writes sticks."""
+        try:
+            os.makedirs(os.path.dirname(RAM_STATE), exist_ok=True)
+            temp = RAM_STATE + ".tmp"
+            with open(temp, "w") as handle:
+                json.dump(payload, handle)
+            os.replace(temp, RAM_STATE)
+            self.set_status(message)
+        except OSError as exc:
+            self.set_status(f"Could not reach the lighting service: {exc}", False)
 
     # ------------------------------------------------------------- my effects
     def refresh_palette(self):
@@ -678,61 +703,25 @@ class Panel(Gtk.ApplicationWindow):
     def palette_colours(self):
         return [rgba_to_tuple(button.get_rgba()) for button in self.palette_buttons]
 
-    def start_animation(self, name, sticks, brightness, colours):
-        self.stop_animation()
-        if not sticks:
-            return
-        effect = effects.BY_NAME[name][0]
-        palette = list(colours or [])
-        level = int(brightness)
-        self.anim_stop.clear()
-        self.animating = True
-        self.stop_button.set_visible(True)
-        self.set_status(f"{name} running on {len(sticks)} stick(s) at {level}%")
-
-        def loop():
-            try:
-                ram.prepare_direct(sticks)
-                started = time.monotonic()
-                due = started
-                last = None
-                while not self.anim_stop.is_set():
-                    moment = time.monotonic() - started
-                    try:
-                        frame = effect(moment, len(sticks), sticks[0].leds, palette)
-                        with self.hardware_lock:
-                            last = ram.write_frame(sticks, frame, level, last)
-                    except Exception as exc:  # noqa: BLE001
-                        self.post_status(f"{name}: {exc}")
-                        break
-                    due += 1 / 20
-                    delay = due - time.monotonic()
-                    if delay > 0:
-                        self.anim_stop.wait(delay)
-                    else:
-                        due = time.monotonic()
-            finally:
-                def finished():
-                    self.animating = False
-                    if not self.closed:
-                        self.stop_button.set_visible(False)
-                    return False
-                GLib.idle_add(finished)
-
-        self.anim_thread = threading.Thread(target=loop, name="rgb-effect", daemon=True)
-        self.anim_thread.start()
-
     def stop_animation(self):
-        thread = self.anim_thread
-        if thread is None:
-            return False
-        self.anim_stop.set()
-        if thread is not threading.current_thread():
-            thread.join(timeout=1.5)
-        self.anim_thread = None
+        """Freeze the kit on the chosen colour; the service keeps owning it."""
+        dev = self.selected
+        sticks = dev.ram_sticks if dev and dev.ram_sticks else []
+        if self.ram_choice > 0 and sticks:
+            sticks = [sticks[self.ram_choice - 1]]
         self.animating = False
-        if getattr(self, "stop_button", None) is not None:
-            self.stop_button.set_visible(False)
+        self.stop_button.set_visible(False)
+        if not sticks:
+            return False
+        payload = {
+            "kind": "hardware",
+            "mode": ram.MODE_STATIC,
+            "speed": 2,
+            "colour": rgb_to_hex(self.colour_button.get_rgba()),
+            "brightness": int(self.bright.get_value()),
+            "sticks": [[stick.bus, stick.address] for stick in sticks],
+        }
+        self.write_lighting(payload, "Effect stopped")
         return True
 
     def start_apply(self, devices, colour):

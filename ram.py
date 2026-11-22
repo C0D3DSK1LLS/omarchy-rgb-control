@@ -16,6 +16,7 @@ Protocol (from OpenRGB's ENE SMBus driver, verified on this box):
 """
 import ctypes
 import fcntl
+import json
 import os
 import time
 
@@ -125,6 +126,34 @@ class Stick:
 
 
 _KNOWN = {}
+_CACHE_FILE = os.path.expanduser("~/.local/state/ralph/rgb-sticks.json")
+
+
+def _load_cache():
+    try:
+        data = json.load(open(_CACHE_FILE))
+    except (OSError, ValueError):
+        return {}
+    known = {}
+    for entry in data:
+        try:
+            bus, address, name, leds = entry
+            known[(int(bus), int(address))] = (str(name), int(leds))
+        except (TypeError, ValueError):
+            continue
+    return known
+
+
+def _save_cache(known):
+    try:
+        os.makedirs(os.path.dirname(_CACHE_FILE), exist_ok=True)
+        payload = [[bus, address, name, leds] for (bus, address), (name, leds) in sorted(known.items())]
+        temp = _CACHE_FILE + ".tmp"
+        with open(temp, "w") as handle:
+            json.dump(payload, handle)
+        os.replace(temp, _CACHE_FILE)
+    except OSError:
+        pass
 
 
 def _probe(fd, address, deadline=1.0):
@@ -151,8 +180,15 @@ def _probe(fd, address, deadline=1.0):
 
 
 def find_sticks():
-    """Every ENE DRAM controller on the memory buses, in bus/address order."""
+    """Every ENE DRAM controller on the memory buses, in bus/address order.
+
+    The iMC engine occasionally NAKs a probe, so a module that has answered
+    before is remembered on disk and kept - a scan must never silently drop a
+    stick and leave it dark.
+    """
+    cache = _load_cache()
     sticks = []
+    found = {}
     for bus in BUSES:
         path = f"/dev/i2c-{bus}"
         try:
@@ -161,22 +197,28 @@ def find_sticks():
             continue
         try:
             for address in ADDRESSES:
-                found = _probe(fd, address)
+                hit = _probe(fd, address)
                 key = (bus, address)
-                if found:
-                    _KNOWN[key] = found
+                if hit:
+                    found[key] = hit
+                elif key in cache:
+                    found[key] = cache[key]
                 elif key in _KNOWN:
-                    # A NAK during a scan must not make a stick disappear.
-                    found = _KNOWN[key]
-                if not found:
+                    found[key] = _KNOWN[key]
+                else:
                     continue
-                name, leds = found
-                if not (name.startswith("AUDA") or name.startswith("DIMM_LED")):
-                    continue
-                sticks.append(Stick(len(sticks) + 1, bus, address, name, leds))
                 time.sleep(0.003)
         finally:
             os.close(fd)
+    for (bus, address), (name, leds) in sorted(found.items()):
+        if not (name.startswith("AUDA") or name.startswith("DIMM_LED")):
+            continue
+        sticks.append(Stick(len(sticks) + 1, bus, address, name, leds))
+    fresh = {key: value for key, value in found.items() if key not in cache}
+    if fresh:
+        cache.update(found)
+        _save_cache(cache)
+    _KNOWN.update(found)
     return sticks
 
 

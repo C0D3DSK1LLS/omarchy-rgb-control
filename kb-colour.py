@@ -43,6 +43,30 @@ def recolour(packet, rgb):
     return bytes(result)
 
 
+SLOTS = 142
+
+
+def recolour_slots(packet, colours):
+    """Paint the LED slots the capture proved are colour carriers.
+
+    Only slots that hold the captured colour are touched; black and white
+    slots are left exactly as captured, so no unknown field is ever written.
+    """
+    if packet[:7] != bytes.fromhex('08 06 00 ac 01 00 00'):
+        raise ValueError('Unexpected packet shape')
+    if packet[7:9] != b'\x12\x00':
+        raise ValueError('Unexpected RGB payload type')
+    result = bytearray(packet)
+    old = bytes.fromhex('1b33ff')
+    slot = 0
+    for offset in range(9, 435, 3):
+        if packet[offset:offset + 3] == old:
+            colour = colours[slot] if slot < len(colours) else (0, 0, 0)
+            result[offset:offset + 3] = bytes(colour)
+            slot += 1
+    return bytes(result), slot
+
+
 def control_path():
     matches = []
     for node in Path('/sys/class/hidraw').glob('hidraw*'):
@@ -128,7 +152,7 @@ def restore_hardware(fd):
     exchange(fd, packet('08 01 03 00 01'))
 
 
-def set_colour(fd, rgb):
+def enter_software(fd):
     reply = exchange(fd, packet('08 02 03'))
     if len(reply) < 4 or reply[3] not in (1, 2):
         raise RuntimeError('Unexpected keyboard mode')
@@ -142,8 +166,21 @@ def set_colour(fd, rgb):
         # ckb-next's bragi_open_handle does this when a handle is already open.
         exchange(fd, packet('08 05 01 00'))
         exchange(fd, packet('08 0d 00 22'))
+
+
+def set_colour(fd, rgb):
+    enter_software(fd)
     template = dict(capture_packets())[10948]
     exchange(fd, recolour(template, rgb))
+
+
+def set_keys(fd, colours):
+    """Paint per-key colours: a list of (r, g, b), one per captured LED slot."""
+    enter_software(fd)
+    template = dict(capture_packets())[10948]
+    frame, painted = recolour_slots(template, colours)
+    exchange(fd, frame)
+    return painted
 
 
 def self_test():
@@ -173,7 +210,9 @@ def self_test():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('colour', nargs='?', default='00FF41', help='RRGGBB')
+    parser.add_argument('colour', nargs='?', default='00FF41', help='RRGGBB, or a comma list with --keys')
+    parser.add_argument('--keys', action='store_true',
+                        help='treat the colour argument as a comma-separated list, one per key')
     parser.add_argument('--self-test', action='store_true', help='check capture fixtures without opening hardware')
     parser.add_argument('--brightness', type=int, default=100, choices=range(101), metavar='0-100',
                         help='scale key RGB values without another RGB controller')
@@ -183,14 +222,35 @@ def main():
     if args.self_test:
         self_test()
         return 0
+    if args.keys:
+        colours = []
+        for token in args.colour.split(','):
+            token = token.strip().lstrip('#')
+            if not token:
+                colours.append((0, 0, 0))
+                continue
+            if len(token) != 6:
+                parser.error('each key colour needs six hexadecimal digits')
+            try:
+                rgb = bytes.fromhex(token)
+            except ValueError:
+                parser.error('each key colour needs six hexadecimal digits')
+            colours.append(tuple(round(channel * args.brightness / 100) for channel in rgb))
+    else:
+        colours = None
     colour = args.colour.lstrip('#')
-    if len(colour) != 6:
-        parser.error('colour must contain six hexadecimal digits')
-    try:
-        rgb = bytes.fromhex(colour)
-    except ValueError:
-        parser.error('colour must contain six hexadecimal digits')
-    rgb = bytes(round(channel * args.brightness / 100) for channel in rgb)
+    if args.keys:
+        rgb = b''
+        caption = f'{len(colours)} key colour(s)'
+    else:
+        if len(colour) != 6:
+            parser.error('colour must contain six hexadecimal digits')
+        try:
+            rgb = bytes.fromhex(colour)
+        except ValueError:
+            parser.error('colour must contain six hexadecimal digits')
+        rgb = bytes(round(channel * args.brightness / 100) for channel in rgb)
+        caption = f'#{colour.upper()} at {args.brightness}%'
     path = control_path()
     if not path.exists():
         raise RuntimeError(f'{path} is not available here; run this command in your host terminal')
@@ -209,8 +269,11 @@ def main():
         try:
             if args.ping:
                 exchange(fd, packet('08 12'))
+            elif args.keys:
+                print(f'{path}: painting {caption} (lighting only)', flush=True)
+                set_keys(fd, colours)
             else:
-                print(f'{path}: requesting #{colour.upper()} at {args.brightness}% (lighting only)', flush=True)
+                print(f'{path}: requesting {caption} (lighting only)', flush=True)
                 set_colour(fd, rgb)
         except (OSError, RuntimeError, ValueError):
             try:
