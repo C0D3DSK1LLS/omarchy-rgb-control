@@ -1069,14 +1069,50 @@ class Panel(Gtk.ApplicationWindow):
         self.write_kb_state(payload)
         self.set_status(f"{name} running on the keyboard")
 
-    def stop_keyboard_effect(self, silent=False):
-        pid = self.kb_anim_pid
+    def keyboard_anim_pid(self):
+        """Our animated process, or one the login service left running."""
+        if self.kb_anim_pid:
+            return self.kb_anim_pid
+        try:
+            with open(KB_STATE) as handle:
+                state = json.load(handle)
+            pid = int(state.get("pid") or 0)
+        except (OSError, ValueError, TypeError):
+            return None
+        if not pid:
+            return None
+        try:
+            cmdline = open(f"/proc/{pid}/cmdline", "rb").read().replace(b"\0", b" ").decode()
+        except OSError:
+            return None
+        return pid if "kb-anim.py" in cmdline else None
+
+    def kill_keyboard_animation(self):
+        """Stop any keyboard animation of ours, even one the state file forgot."""
+        pids = set()
+        pid = self.keyboard_anim_pid()
         if pid:
+            pids.add(pid)
+        marker = os.path.join(HERE, "kb-anim.py")
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
             try:
-                os.kill(pid, 15)
+                cmdline = open(f"/proc/{entry}/cmdline", "rb").read().replace(b"\0", b" ").decode()
+            except OSError:
+                continue
+            if marker in cmdline:
+                pids.add(int(entry))
+        for target in pids:
+            try:
+                os.kill(target, 15)
             except OSError:
                 pass
-            self.kb_anim_pid = None
+        self.kb_anim_pid = None
+        return bool(pids)
+
+    def stop_keyboard_effect(self, silent=False):
+        self.kill_keyboard_animation()
         self.write_kb_state({"kind": "solid",
                              "colour": rgb_to_hex(self.colour_button.get_rgba()),
                              "brightness": int(self.bright.get_value())})
@@ -1094,6 +1130,8 @@ class Panel(Gtk.ApplicationWindow):
             pass
 
     def send_keyboard_frame(self, overrides=None):
+        # A running animation would repaint over this frame within 50 ms.
+        self.kill_keyboard_animation()
         colours = []
         for slot in range(142):
             value = (overrides or self.key_colours).get(slot)
@@ -1192,6 +1230,7 @@ class Panel(Gtk.ApplicationWindow):
         brightness = self.brightness
         devices = list(devices)
         if any(is_k70_optical(dev) for dev in devices):
+            self.kill_keyboard_animation()
             self.save_keyboard_state(colour, brightness)
         def native_write(value, level):
             # Set before USB begins so closing during first apply still restores.
