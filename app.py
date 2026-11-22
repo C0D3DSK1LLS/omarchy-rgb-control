@@ -427,6 +427,21 @@ class Panel(Gtk.ApplicationWindow):
         kb_keys_lbl.set_xalign(0)
         self.kb_keys_row.append(kb_keys_lbl)
         kb_buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        keys_colour_label = Gtk.Label(label="KEYS COLOUR")
+        keys_colour_label.add_css_class("eyebrow")
+        kb_buttons.append(keys_colour_label)
+        self.keys_colour_button = Gtk.ColorDialogButton(dialog=Gtk.ColorDialog())
+        self.keys_colour_button.set_rgba(hex_to_rgba("#00ff41"))
+        kb_buttons.append(self.keys_colour_button)
+        paint = Gtk.Button(label="Paint selected")
+        paint.connect("clicked", lambda *_: self.paint_selected_keys())
+        kb_buttons.append(paint)
+        select_all = Gtk.Button(label="Select all")
+        select_all.connect("clicked", lambda *_: self.select_all_keys())
+        kb_buttons.append(select_all)
+        deselect = Gtk.Button(label="Clear selection")
+        deselect.connect("clicked", lambda *_: self.clear_key_selection())
+        kb_buttons.append(deselect)
         fill = Gtk.Button(label="Fill all keys")
         fill.connect("clicked", lambda *_: self.fill_all_keys())
         kb_buttons.append(fill)
@@ -455,6 +470,7 @@ class Panel(Gtk.ApplicationWindow):
         self.kb_keys_row.set_visible(False)
         right.append(self.kb_keys_row)
         self.key_colours = {}
+        self.kb_selected = set()
         self.kb_anim_pid = None
 
         self.ram_choice = 0
@@ -925,18 +941,46 @@ class Panel(Gtk.ApplicationWindow):
             self.set_status(message or "Keyboard write failed", False)
         return ok
 
-    def on_key_clicked(self, _button, slot):
-        self.key_colours[slot] = rgb_to_hex(self.colour_button.get_rgba())
+    def on_key_clicked(self, button, slot):
+        """Clicking a key only selects it; painting is a separate action."""
+        if slot in self.kb_selected:
+            self.kb_selected.discard(slot)
+            button.remove_css_class("kb-selected")
+        else:
+            self.kb_selected.add(slot)
+            button.add_css_class("kb-selected")
+
+    def paint_selected_keys(self):
+        if not self.kb_selected:
+            self.set_status("Select keys first, then paint them", False)
+            return
+        colour = rgb_to_hex(self.keys_colour_button.get_rgba())
+        for slot in self.kb_selected:
+            self.key_colours[slot] = colour
         self.send_keyboard_frame()
+        self.set_status(f"Painted {len(self.kb_selected)} key(s) {colour}")
+
+    def select_all_keys(self):
+        for slot, button in self.kb_key_buttons.items():
+            self.kb_selected.add(slot)
+            button.add_css_class("kb-selected")
+
+    def clear_key_selection(self):
+        for slot in list(self.kb_selected):
+            button = self.kb_key_buttons.get(slot)
+            if button is not None:
+                button.remove_css_class("kb-selected")
+        self.kb_selected.clear()
 
     def fill_all_keys(self):
-        colour = rgb_to_hex(self.colour_button.get_rgba())
+        colour = rgb_to_hex(self.keys_colour_button.get_rgba())
         for slot in kb_keys.LABELS:
             self.key_colours[slot] = colour
         self.send_keyboard_frame()
 
     def clear_keys(self):
         self.key_colours.clear()
+        self.clear_key_selection()
         self.send_keyboard_frame()
 
     def save_keyboard_state(self, colour, brightness):
