@@ -113,7 +113,7 @@ class Client:
         for r, g, b in colours:
             payload += bytes((r, g, b))
         self._send(PKT_UPDATEZONELEDS, device, payload)
-        return self.ack()
+        return True
 
 
 # ------------------------------------------------------------------ helpers

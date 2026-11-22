@@ -37,8 +37,13 @@ PRESETS = [
     ("Off", "#000000"),
 ]
 
-# zones that are addressable and need their length set before a frame is sent
-ADDRESSABLE = {"jrainbow1": 200, "jrainbow2": 240, "jcorsair": 240}
+# per-zone LED counts for the MSI board. The CLI's total is unreliable because
+# it re-reads its own saved zone sizes, so each zone is written by its own count.
+ZONE_LEDS = {
+    "jrgb1": 1, "jrgb2": 1, "jrainbow1": 30, "jrainbow2": 30,
+    "jcorsair": 1, "pipe1": 1, "pipe2": 1, "onboard": 6,
+}
+ADDRESSABLE = {"jrainbow1", "jrainbow2", "jcorsair"}
 ADDRESSABLE_LEN = 30          # what the fan hub actually answers to
 
 
@@ -229,18 +234,9 @@ class Panel(Gtk.ApplicationWindow):
 
     # ------------------------------------------------------------------ state
     def connect(self):
-        if self.client is not None:
-            return self.client
-        if not orbg.ensure_server():
-            self.set_status("OpenRGB server is not answering on port 6742", False)
-            return None
-        try:
-            self.client = orbg.Client()
-            self.client.set_client_name("PeaceMachine RGB Control")
-        except Exception as exc:
-            self.client = None
-            self.set_status(f"could not connect: {exc}", False)
-        return self.client
+        # Deliberately no OpenRGB server: a running server holds the board open
+        # and the command-line writes then land nowhere. CLI only.
+        return None
 
     def scan(self):
         while (child := self.listbox.get_first_child()):
@@ -294,23 +290,22 @@ class Panel(Gtk.ApplicationWindow):
                             f"{dev.name}: {msg.splitlines()[-1] if msg else 'failed'}", ok)
             return ok
 
-        client = self.connect()
-        if client is None:
-            return False
-        try:
-            for zi, zone in enumerate(dev.zones):
-                key = zone.lower().replace(" ", "")
+        known = [z.lower().replace(" ", "") for z in dev.zones]
+        ok = True
+        if known and all(k in ZONE_LEDS for k in known):
+            for zi, key in enumerate(known):
+                args = ["-d", dev.name, "-z", str(zi)]
                 if key in ADDRESSABLE:
-                    client.resize_zone(dev.index, zi, ADDRESSABLE_LEN)
-            client.custom_mode(dev.index)
-            if dev.led_count:
-                client.update_leds(dev.index, [hex_to_tuple(colour)] * dev.led_count)
-            client.drain(0.1)
-            self.set_status(f"{dev.name}: {colour} over {dev.led_count} LED(s)")
-            return True
-        except Exception as exc:
-            self.set_status(f"{dev.name}: {exc}", False)
-            return False
+                    args += ["-sz", str(ADDRESSABLE_LEN)]
+                args += ["-m", "static", "-c", colour.lstrip("#"), "-b", str(self.brightness)]
+                good, msg = cli(args)
+                ok = ok and good
+        else:
+            ok, msg = cli(["-d", dev.name, "-m", "Static", "-c", colour.lstrip("#"),
+                           "-b", str(self.brightness)])
+        self.set_status(f"{dev.name}: {colour}" if ok else
+                        f"{dev.name}: {msg.splitlines()[-1] if msg else 'failed'}", ok)
+        return ok
 
     def apply_everything(self, colour):
         rgba = hex_to_rgba(colour)
