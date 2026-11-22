@@ -25,6 +25,8 @@ sys.path.insert(0, HERE)
 import orbg  # noqa: E402
 import ram  # noqa: E402
 import effects  # noqa: E402
+import kbfx  # noqa: E402
+import kb_keys  # noqa: E402
 
 APP_ID = "org.jimmy.RgbControl"
 OPENRGB = "/usr/local/bin/openrgb"
@@ -32,6 +34,7 @@ OPENRGB_CONFIG = os.path.join(HERE, "openrgb-config")
 K70_NAME = "Corsair K70 RGB PRO Optical-Mechanical"
 STATE = os.path.join(HERE, "state.json")
 RAM_STATE = os.path.expanduser("~/.local/state/ralph/rgb-ram-state.json")
+KB_STATE = os.path.expanduser("~/.local/state/ralph/rgb-keyboard-state.json")
 
 # per-zone LED counts for the MSI board. The CLI's total is unreliable because
 # it re-reads its own saved zone sizes, so each zone is written by its own count.
@@ -167,7 +170,8 @@ def keyboard_request(args):
     try:
         result = subprocess.run(
             [sys.executable, os.path.join(HERE, "kb-colour.py")] + args,
-            capture_output=True, text=True, timeout=8)
+            capture_output=True, text=True, timeout=8,
+            env=dict(os.environ, RGB_KB_WRITES="1"))
         return result.returncode == 0, (result.stdout + result.stderr).strip()
     except Exception as exc:
         return False, str(exc)
@@ -395,6 +399,64 @@ class Panel(Gtk.ApplicationWindow):
         right.append(self.palette_row)
         self.palette_buttons = []
 
+        # ---- keyboard: effects and per-key painting ----
+        self.kb_fx_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        kb_fx_lbl = Gtk.Label(label="KEYBOARD FX")
+        kb_fx_lbl.add_css_class("eyebrow")
+        self.kb_fx_row.append(kb_fx_lbl)
+        self.kb_fx_dropdown = Gtk.DropDown.new_from_strings(["None"] + kbfx.EFFECT_NAMES)
+        self.kb_fx_row.append(self.kb_fx_dropdown)
+        self.kb_start_button = Gtk.Button(label="Start effect")
+        self.kb_start_button.connect("clicked", lambda *_: self.start_keyboard_effect())
+        self.kb_fx_row.append(self.kb_start_button)
+        self.kb_stop_button = Gtk.Button(label="Stop keyboard effect")
+        self.kb_stop_button.connect("clicked", lambda *_: self.stop_keyboard_effect())
+        self.kb_fx_row.append(self.kb_stop_button)
+        self.kb_fx_row.set_visible(False)
+        right.append(self.kb_fx_row)
+
+        self.kb_palette_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+        self.kb_palette_row.set_visible(False)
+        self.kb_palette_buttons = []
+        right.append(self.kb_palette_row)
+        self.kb_fx_dropdown.connect("notify::selected", lambda *_: self.refresh_kb_palette())
+
+        self.kb_keys_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        kb_keys_lbl = Gtk.Label(label="PER KEY  (click a key to paint it)")
+        kb_keys_lbl.add_css_class("eyebrow")
+        kb_keys_lbl.set_xalign(0)
+        self.kb_keys_row.append(kb_keys_lbl)
+        kb_buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        fill = Gtk.Button(label="Fill all keys")
+        fill.connect("clicked", lambda *_: self.fill_all_keys())
+        kb_buttons.append(fill)
+        clear = Gtk.Button(label="Clear keys")
+        clear.connect("clicked", lambda *_: self.clear_keys())
+        kb_buttons.append(clear)
+        self.kb_keys_row.append(kb_buttons)
+        kb_scroller = Gtk.ScrolledWindow()
+        kb_scroller.set_min_content_height(190)
+        kb_scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.kb_grid = Gtk.FlowBox()
+        self.kb_grid.set_max_children_per_line(13)
+        self.kb_grid.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.kb_grid.set_column_spacing(3)
+        self.kb_grid.set_row_spacing(3)
+        self.kb_key_buttons = {}
+        for slot, label in kb_keys.KEYS:
+            button = Gtk.Button(label=label)
+            button.add_css_class("kb-key")
+            button.set_tooltip_text(f"{label} · slot {slot}")
+            button.connect("clicked", self.on_key_clicked, slot)
+            self.kb_grid.append(button)
+            self.kb_key_buttons[slot] = button
+        kb_scroller.set_child(self.kb_grid)
+        self.kb_keys_row.append(kb_scroller)
+        self.kb_keys_row.set_visible(False)
+        right.append(self.kb_keys_row)
+        self.key_colours = {}
+        self.kb_anim_pid = None
+
         self.ram_choice = 0
         self.ram_syncing = False
         self.ram_toggles = []
@@ -451,14 +513,9 @@ class Panel(Gtk.ApplicationWindow):
     def on_close(self, *_args):
         self.closed = True
         self.cancelled.set()
-        if self.keepalive_source is not None:
-            GLib.source_remove(self.keepalive_source)
-            self.keepalive_source = None
-        def cleanup():
-            # Wait for any colour write before restoring hardware control.
-            with self.hardware_lock:
-                self.release_keyboard()
-        threading.Thread(target=cleanup, name="rgb-release").start()
+        # Lighting is left in software mode on purpose: handing control back
+        # would snap the keyboard to its stored red profile, which is exactly
+        # what C0D3D does not want when he closes the panel.
         return False
 
     def keep_keyboard_alive(self):
@@ -570,9 +627,18 @@ class Panel(Gtk.ApplicationWindow):
             if not self.state_restored:
                 self.apply_saved_state()
                 self.state_restored = True
+        elif dev.keyboard:
+            self.meta_label.set_text(f"{dev.type} · {dev.led_count} keys")
+            self.zones_label.set_text("Paint keys below, or start a keyboard effect.")
         else:
             self.meta_label.set_text(f"{dev.type} · {len(dev.zones)} channel(s) · {dev.led_count} LED(s)")
             self.zones_label.set_text("Channels: " + (", ".join(dev.zones) if dev.zones else "none"))
+        keyboard = bool(dev.keyboard)
+        for widget in (self.kb_fx_row, self.kb_keys_row):
+            widget.set_visible(keyboard)
+        self.kb_palette_row.set_visible(keyboard and self.kb_fx_dropdown.get_selected() > 0)
+        if keyboard:
+            self.refresh_kb_palette()
         self.update_apply_label()
 
     def build_ram_choices(self, dev):
@@ -776,6 +842,115 @@ class Panel(Gtk.ApplicationWindow):
         self.write_lighting(payload, "Effect stopped")
         return True
 
+    # ------------------------------------------------------------- keyboard
+    def refresh_kb_palette(self):
+        dev = self.selected
+        while (child := self.kb_palette_row.get_first_child()):
+            self.kb_palette_row.remove(child)
+        self.kb_palette_buttons = []
+        choice = self.kb_fx_dropdown.get_selected()
+        if not (dev and dev.keyboard) or choice <= 0:
+            self.kb_palette_row.set_visible(False)
+            return
+        name = kbfx.EFFECT_NAMES[choice - 1]
+        _fn, defaults, labels = kbfx.BY_NAME[name]
+        for label, default in zip(labels, defaults):
+            cell = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+            caption = Gtk.Label(label=label.upper())
+            caption.add_css_class("eyebrow")
+            caption.set_xalign(0)
+            cell.append(caption)
+            button = Gtk.ColorDialogButton(dialog=Gtk.ColorDialog())
+            button.set_rgba(hex_to_rgba("#%02x%02x%02x" % tuple(default)))
+            cell.append(button)
+            self.kb_palette_row.append(cell)
+            self.kb_palette_buttons.append(button)
+        self.kb_palette_row.set_visible(True)
+
+    def start_keyboard_effect(self):
+        choice = self.kb_fx_dropdown.get_selected()
+        if choice <= 0:
+            return
+        self.stop_keyboard_effect(silent=True)
+        name = kbfx.EFFECT_NAMES[choice - 1]
+        colours = [rgb_to_hex(button.get_rgba()).lstrip("#") for button in self.kb_palette_buttons]
+        payload = {"kind": "custom", "effect": name, "colours": colours,
+                   "brightness": int(self.bright.get_value())}
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, os.path.join(HERE, "kb-anim.py"), name, ",".join(colours),
+                 str(int(self.bright.get_value()))],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL, start_new_session=True,
+                env=dict(os.environ, RGB_KB_WRITES="1"))
+        except OSError as exc:
+            self.set_status(f"Could not start keyboard effect: {exc}", False)
+            return
+        self.kb_anim_pid = proc.pid
+        payload["pid"] = proc.pid
+        self.write_kb_state(payload)
+        self.set_status(f"{name} running on the keyboard")
+
+    def stop_keyboard_effect(self, silent=False):
+        pid = self.kb_anim_pid
+        if pid:
+            try:
+                os.kill(pid, 15)
+            except OSError:
+                pass
+            self.kb_anim_pid = None
+        self.write_kb_state({"kind": "solid",
+                             "colour": rgb_to_hex(self.colour_button.get_rgba()),
+                             "brightness": int(self.bright.get_value())})
+        if not silent:
+            self.set_status("Keyboard effect stopped")
+
+    def write_kb_state(self, payload):
+        try:
+            os.makedirs(os.path.dirname(KB_STATE), exist_ok=True)
+            temp = KB_STATE + ".tmp"
+            with open(temp, "w") as handle:
+                json.dump(payload, handle)
+            os.replace(temp, KB_STATE)
+        except OSError:
+            pass
+
+    def send_keyboard_frame(self, overrides=None):
+        colours = []
+        for slot in range(142):
+            value = (overrides or self.key_colours).get(slot)
+            colours.append(value.lstrip("#") if value else "000000")
+        ok, message = keyboard_request(["--keys", ",".join(colours)])
+        if not ok:
+            self.set_status(message or "Keyboard write failed", False)
+        return ok
+
+    def on_key_clicked(self, _button, slot):
+        self.key_colours[slot] = rgb_to_hex(self.colour_button.get_rgba())
+        self.send_keyboard_frame()
+
+    def fill_all_keys(self):
+        colour = rgb_to_hex(self.colour_button.get_rgba())
+        for slot in kb_keys.LABELS:
+            self.key_colours[slot] = colour
+        self.send_keyboard_frame()
+
+    def clear_keys(self):
+        self.key_colours.clear()
+        self.send_keyboard_frame()
+
+    def save_keyboard_state(self, colour, brightness):
+        """Remember the keyboard colour so login can re-apply it."""
+        payload = {"kind": "solid", "colour": colour, "brightness": int(brightness)}
+        try:
+            os.makedirs(os.path.dirname(KB_STATE), exist_ok=True)
+            temp = KB_STATE + ".tmp"
+            with open(temp, "w") as handle:
+                json.dump(payload, handle)
+            os.replace(temp, KB_STATE)
+        except OSError:
+            pass
+
     def start_apply(self, devices, colour):
         if self.busy or not devices:
             return
@@ -784,6 +959,8 @@ class Panel(Gtk.ApplicationWindow):
         self.brightness = int(self.bright.get_value())
         brightness = self.brightness
         devices = list(devices)
+        if any(is_k70_optical(dev) for dev in devices):
+            self.save_keyboard_state(colour, brightness)
         def native_write(value, level):
             # Set before USB begins so closing during first apply still restores.
             self.keyboard_touched = True

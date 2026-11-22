@@ -213,6 +213,9 @@ def main():
     parser.add_argument('colour', nargs='?', default='00FF41', help='RRGGBB, or a comma list with --keys')
     parser.add_argument('--keys', action='store_true',
                         help='treat the colour argument as a comma-separated list, one per key')
+    parser.add_argument('--stream', action='store_true',
+                        help='read frames (comma lists) from stdin until EOF; leaves software '
+                             'lighting active on exit so the look survives this process')
     parser.add_argument('--self-test', action='store_true', help='check capture fixtures without opening hardware')
     parser.add_argument('--brightness', type=int, default=100, choices=range(101), metavar='0-100',
                         help='scale key RGB values without another RGB controller')
@@ -251,9 +254,35 @@ def main():
             parser.error('colour must contain six hexadecimal digits')
         rgb = bytes(round(channel * args.brightness / 100) for channel in rgb)
         caption = f'#{colour.upper()} at {args.brightness}%'
+    if os.environ.get('RGB_KB_WRITES') != '1':
+        print('Keyboard writes are frozen while the bootloader fault is investigated '
+              '(set RGB_KB_WRITES=1 to override).', file=sys.stderr)
+        return 3
     path = control_path()
     if not path.exists():
         raise RuntimeError(f'{path} is not available here; run this command in your host terminal')
+    if args.stream:
+        import sys as _sys
+        with path.open('r+b', buffering=0) as handle:
+            fd = handle.fileno()
+            os.set_blocking(fd, False)
+            enter_software(fd)
+            template = dict(capture_packets())[10948]
+            for line in _sys.stdin:
+                line = line.strip()
+                if not line:
+                    continue
+                colours = []
+                for token in line.split(','):
+                    token = token.strip().lstrip('#')
+                    if not token:
+                        colours.append((0, 0, 0))
+                        continue
+                    rgb = bytes.fromhex(token)
+                    colours.append(tuple(rgb))
+                frame, _painted = recolour_slots(template, colours)
+                exchange(fd, frame)
+        return 0
     with path.open('r+b', buffering=0) as handle:
         fd = handle.fileno()
         os.set_blocking(fd, False)

@@ -18,6 +18,7 @@ State file: ~/.local/state/ralph/rgb-ram-state.json
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -29,6 +30,7 @@ import effects  # noqa: E402
 import ram  # noqa: E402
 
 STATE = Path(os.path.expanduser("~/.local/state/ralph/rgb-ram-state.json"))
+KB_STATE = Path(os.path.expanduser("~/.local/state/ralph/rgb-keyboard-state.json"))
 LOG = Path(os.path.expanduser("~/.local/state/ralph/diagnostics/rgb-lighting.log"))
 FPS = 20.0
 POLL = 0.25
@@ -124,10 +126,36 @@ def read_state():
         return None
 
 
+def paint_keyboard():
+    """Re-apply the keyboard look at login; the board forgets it on power loss."""
+    try:
+        state = json.loads(KB_STATE.read_text())
+    except (OSError, ValueError):
+        return
+    env = dict(os.environ, RGB_KB_WRITES="1")
+    try:
+        if state.get("kind") == "custom" and state.get("effect"):
+            colours = ",".join(state.get("colours") or [])
+            subprocess.Popen([sys.executable, str(HERE / "kb-anim.py"), state["effect"],
+                              colours, str(int(state.get("brightness", 80)))],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             stdin=subprocess.DEVNULL, start_new_session=True, env=env)
+            log(f"keyboard effect {state['effect']} started")
+        elif state.get("kind") == "solid":
+            subprocess.run([sys.executable, str(HERE / "kb-colour.py"),
+                            str(state.get("colour", "#00ff41")).lstrip("#"),
+                            "--brightness", str(int(state.get("brightness", 80)))],
+                           capture_output=True, timeout=30, env=env)
+            log(f"keyboard colour {state.get('colour')} restored")
+    except (OSError, ValueError) as exc:
+        log(f"keyboard restore failed: {exc}")
+
+
 def main():
     signal.signal(signal.SIGTERM, lambda *_: globals().__setitem__("stopping", True))
     signal.signal(signal.SIGINT, lambda *_: globals().__setitem__("stopping", True))
     log(f"lighting service started (pid {os.getpid()})")
+    paint_keyboard()
     stamp = None
     state = None
     while not stopping:
